@@ -12,7 +12,7 @@ class TestSupportedAreaTypes:
 
     def test_supported_area_types_exist(self) -> None:
         """Test that all expected area types are defined."""
-        expected_types = {"chatgpt", "atuin", "terminal", "custom"}
+        expected_types = {"chatgpt", "atuin", "terminal", "sensitive_text", "custom"}
         assert set(SUPPORTED_AREA_TYPES.keys()) == expected_types
 
     def test_area_types_have_descriptions(self) -> None:
@@ -25,7 +25,7 @@ class TestSupportedAreaTypes:
             if area_type == "custom":
                 assert "user" in description.lower() or "defined" in description.lower()
             else:
-                assert area_type in description.lower()
+                assert area_type.replace("_", " ") in description.lower()
 
     def test_chatgpt_type_description(self) -> None:
         """Test ChatGPT type has appropriate description."""
