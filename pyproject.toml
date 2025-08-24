@@ -40,6 +40,14 @@ ignore = [
     "PLR0913",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",     # Allow asserts in tests
+    "PLR2004",  # Allow magic values in tests
+    "T201",     # Allow print statements in tests
+    "ANN201",   # Missing return type annotations in test methods are ok
+]
+
 [tool.ruff.lint.pylint]
 max-args = 7
 
@@ -49,6 +57,9 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.138.2",
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
     "ruff>=0.12.10",
 ]
 
