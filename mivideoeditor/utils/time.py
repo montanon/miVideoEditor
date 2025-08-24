@@ -37,9 +37,18 @@ class TimeUtils:
         if colon_match:
             hours_str, minutes_str, seconds_str, millis_str = colon_match.groups()
 
-            hours = int(hours_str) if hours_str else 0
-            minutes = int(minutes_str) if minutes_str else 0
-            seconds = int(seconds_str)
+            # Fix interpretation: if only two groups are captured, treat them as minutes:seconds
+            if hours_str is not None and minutes_str is None:
+                # This is actually MM:SS, not HH:SS
+                minutes = int(hours_str)
+                hours = 0
+                seconds = int(seconds_str)
+            else:
+                # This is HH:MM:SS or just SS
+                hours = int(hours_str) if hours_str else 0
+                minutes = int(minutes_str) if minutes_str else 0
+                seconds = int(seconds_str)
+
             millis = int(millis_str.ljust(3, "0")) if millis_str else 0
 
             # Validation
@@ -57,7 +66,12 @@ class TimeUtils:
         # Try human-readable formats
         try:
             return TimeUtils._parse_human_readable(time_str)
-        except ValueError:
+        except ValueError as e:
+            # If the error is about no time components found and the string contains spaces,
+            # keep that specific error (for strings like "hello world")
+            if "No time components found" in str(e) and " " in time_str:
+                raise
+            # For other cases (single words, unsupported units), use generic message
             pass
 
         msg = f"Unrecognized time format: {time_str}"
@@ -66,7 +80,19 @@ class TimeUtils:
     @staticmethod
     def _parse_human_readable(time_str: str) -> float:
         """Parse human-readable time strings like '1h 30m 45s'."""
+        original_str = time_str
         time_str = time_str.lower().replace(",", " ")
+
+        # Check for unsupported time units (like days, weeks, etc.)
+        unsupported_patterns = [
+            r"\d+\s*d(?:ay)?s?",  # days
+            r"\d+\s*w(?:eek)?s?",  # weeks
+            r"\d+\s*y(?:ear)?s?",  # years
+        ]
+        for pattern in unsupported_patterns:
+            if re.search(pattern, time_str):
+                msg = f"Unsupported time unit in: {original_str}"
+                raise ValueError(msg)
 
         # Define patterns for different time units
         patterns = [
@@ -186,9 +212,9 @@ class TimeUtils:
             if remaining_secs == 0:
                 return f"{minutes}m"
             return f"{minutes}m{int(remaining_secs)}s"
-        hours = int(seconds // SECONDS_IN_MINUTE * MINUTES_IN_HOUR)
+        hours = int(seconds // (SECONDS_IN_MINUTE * MINUTES_IN_HOUR))
         remaining_minutes = int(
-            (seconds % SECONDS_IN_MINUTE * MINUTES_IN_HOUR) // SECONDS_IN_MINUTE
+            (seconds % (SECONDS_IN_MINUTE * MINUTES_IN_HOUR)) // SECONDS_IN_MINUTE
         )
         remaining_secs = seconds % SECONDS_IN_MINUTE
 
@@ -254,11 +280,17 @@ class TimeUtils:
         current_pos = 0.0
 
         for start, end in merged_ranges:
+            # Clip range to total duration
+            clipped_start = max(0.0, min(start, total_duration))
+            clipped_end = max(0.0, min(end, total_duration))
+            # Skip ranges that are entirely beyond total duration
+            if clipped_start >= total_duration:
+                break
             # Check for gap before this range
-            if start > current_pos + min_gap_size:
-                gaps.append((current_pos, start))
+            if clipped_start > current_pos + min_gap_size:
+                gaps.append((current_pos, clipped_start))
 
-            current_pos = max(current_pos, end)
+            current_pos = max(current_pos, clipped_end)
 
         # Check for gap after last range
         if current_pos < total_duration - min_gap_size:
@@ -328,6 +360,10 @@ class TimeUtils:
             # Only add chunk if it has meaningful duration
             if current_end > current_start:
                 chunks.append((current_start, current_end))
+
+            # If this chunk reaches the end, stop
+            if current_end >= total_duration:
+                break
 
             current_start += step
 
