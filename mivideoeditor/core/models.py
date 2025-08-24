@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Self
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from mivideoeditor.core.constants import SUPPORTED_AREA_TYPES
 
 
 class BoundingBox(BaseModel):
@@ -285,4 +290,113 @@ class ValidationResult(BaseModel):
         return (
             f"ValidationResult(is_valid={self.is_valid}, "
             f"errors={self.errors!r}, warnings={self.warnings!r})"
+        )
+
+
+class SensitiveArea(BaseModel):
+    """Represents an annotated sensitive region with metadata."""
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique identifier (UUID4)",
+    )
+    timestamp: float = Field(..., ge=0, description="Video timestamp in seconds")
+    bounding_box: BoundingBox = Field(..., description="Region coordinates")
+    area_type: str = Field(..., description="Type: chatgpt, atuin, terminal, custom")
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score [0.0, 1.0]",
+    )
+    image_path: Path | None = Field(
+        default=None,
+        description="Path to extracted frame image",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional metadata",
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Creation timestamp",
+    )
+
+    @field_validator("area_type")
+    @classmethod
+    def validate_area_type(cls, v: str) -> str:
+        """Validate area type against supported types."""
+        if v not in SUPPORTED_AREA_TYPES:
+            supported = list(SUPPORTED_AREA_TYPES.keys())
+            msg = f"Unsupported area type: {v}. Must be one of {supported}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("id")
+    @classmethod
+    def validate_uuid(cls, v: str) -> str:
+        """Validate UUID format."""
+        try:
+            uuid.UUID(v)
+        except ValueError as e:
+            msg = f"Invalid UUID format: {v}"
+            raise ValueError(msg) from e
+        return v
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, v: Path | None) -> Path | None:
+        """Validate image path exists if provided."""
+        if v is not None and not v.exists():
+            # Just convert to Path, don't check existence as file might not exist yet
+            return Path(v)
+        return v
+
+    @property
+    def area(self) -> int:
+        """Get the area of the bounding box."""
+        return self.bounding_box.area
+
+    @property
+    def is_manual(self) -> bool:
+        """Check if this is a manual annotation (confidence = 1.0)."""
+        return self.confidence == 1.0
+
+    @property
+    def needs_review(self) -> bool:
+        """Check if this area needs manual review."""
+        review_threshold = 0.8
+        return self.confidence < review_threshold
+
+    def to_detection_format(self) -> dict[str, Any]:
+        """Convert to detection result format."""
+        return {
+            "timestamp": self.timestamp,
+            "bounding_box": self.bounding_box.model_dump(),
+            "confidence": self.confidence,
+            "area_type": self.area_type,
+            "metadata": self.metadata,
+        }
+
+    def with_updated_confidence(self, new_confidence: float) -> SensitiveArea:
+        """Create a copy with updated confidence."""
+        return self.model_copy(update={"confidence": new_confidence})
+
+    def with_updated_bbox(self, new_bbox: BoundingBox) -> SensitiveArea:
+        """Create a copy with updated bounding box."""
+        return self.model_copy(update={"bounding_box": new_bbox})
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return (
+            f"SensitiveArea({self.area_type} at {self.timestamp:.2f}s, "
+            f"confidence={self.confidence:.2f})"
+        )
+
+    def __repr__(self) -> str:
+        """Return detailed representation."""
+        return (
+            f"SensitiveArea(id={self.id[:8]}..., timestamp={self.timestamp}, "
+            f"bbox={self.bounding_box}, type={self.area_type}, "
+            f"confidence={self.confidence})"
         )
