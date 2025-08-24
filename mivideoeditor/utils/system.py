@@ -538,7 +538,7 @@ class SystemUtils:
 
         # Check Python packages
         required_packages = ["pydantic", "numpy"]
-        optional_packages = ["opencv-python", "pillow", "psutil", "fastapi"]
+        optional_packages = ["opencv-python", "psutil"]
 
         for package in required_packages:
             available = deps.get(package, {}).get("available", False)

@@ -5,6 +5,7 @@ SUPPORTED_AREA_TYPES = {
     "chatgpt": "ChatGPT conversation interface",
     "atuin": "Atuin terminal history search",
     "terminal": "Generic terminal content",
+    "sensitive_text": "Generic sensitive text content",
     "custom": "User-defined sensitive area",
 }
 
