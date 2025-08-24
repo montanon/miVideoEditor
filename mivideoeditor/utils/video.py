@@ -321,7 +321,13 @@ class VideoUtils:
         # Try to extract video metadata
         try:
             video_info = VideoUtils.get_video_info(video_path)
-            result.context["video_info"] = video_info.to_dict()
+            # Store basic video info in context (only basic types)
+            result.context["duration"] = video_info.duration
+            result.context["width"] = video_info.width
+            result.context["height"] = video_info.height
+            result.context["frame_rate"] = video_info.frame_rate
+            result.context["codec"] = video_info.codec or "unknown"
+            result.context["file_size_mb"] = video_info.file_size_mb
 
             # Validate video properties
             validation_result = VideoUtils._validate_video_properties(video_info)
