@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pkg_resources
 import psutil
 
 logger = logging.getLogger(__name__)
@@ -238,11 +237,13 @@ class SystemUtils:
             __import__(package_name.replace("-", "_"))
             try:
                 version = importlib.metadata.version(package_name)
-            except (importlib.metadata.PackageNotFoundError, AttributeError):
-                try:
-                    version = pkg_resources.get_distribution(package_name).version
-                except (ValueError, AttributeError, ImportError):
-                    version = "unknown"
+            except (
+                importlib.metadata.PackageNotFoundError,
+                ValueError,
+                AttributeError,
+                ImportError,
+            ):
+                version = "unknown"
 
         except ImportError:
             return {
