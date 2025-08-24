@@ -58,11 +58,16 @@ class ImageUtils:
             msg = f"Error loading image {image_path}: {e}"
             logger.exception(msg)
             raise RuntimeError(msg) from e
+
         return image
 
     @staticmethod
     def save_image(image: np.ndarray, output_path: Path, quality: int = 95) -> None:
         """Save a numpy array as an image file."""
+        if not isinstance(image, np.ndarray):
+            msg = f"Image must be a numpy array, got {type(image)}"
+            raise TypeError(msg)
+
         if image.size == 0:
             msg = "Cannot save empty image"
             raise ValueError(msg)
@@ -261,7 +266,18 @@ class ImageUtils:
             # Calculate SSIM using OpenCV's built-in function if available
             if hasattr(cv2, "quality") and hasattr(cv2.quality, "QualitySSIM_compute"):
                 ssim_map = cv2.quality.QualitySSIM_compute(image1, image2)
-                return float(ssim_map[0])
+                # QualitySSIM_compute returns a tuple (ssim_value, ssim_map)
+                # We want just the scalar SSIM value
+                if isinstance(ssim_map, tuple):
+                    # Extract the scalar SSIM value from the first element
+                    if isinstance(ssim_map[0], (list, tuple, np.ndarray)):
+                        return float(
+                            ssim_map[0][0]
+                            if hasattr(ssim_map[0], "__getitem__")
+                            else ssim_map[0]
+                        )
+                    return float(ssim_map[0])
+                return float(ssim_map)
             return ImageUtils._compute_ssim_manual(image1, image2)
 
         except Exception as e:
