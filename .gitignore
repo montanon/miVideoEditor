@@ -1,4 +1,8 @@
 .claude/
+.claude_logs/
+.vscode/
+.hypothesis/
+.coverage
 
 # Python-generated files
 __pycache__/
