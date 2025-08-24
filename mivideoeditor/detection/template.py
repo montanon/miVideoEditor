@@ -27,7 +27,7 @@ class ColorProfile:
         hsv_lower: tuple[int, int, int],
         hsv_upper: tuple[int, int, int],
         name: str | None = None,
-    ):
+    ) -> None:
         self.area_type = area_type
         self.hsv_lower = np.array(hsv_lower, dtype=np.uint8)
         self.hsv_upper = np.array(hsv_upper, dtype=np.uint8)
@@ -48,7 +48,7 @@ class Detection:
         detection_type: str,
         template_match_score: float = 0.0,
         color_match_score: float = 0.0,
-    ):
+    ) -> None:
         self.bbox = bbox
         self.confidence = confidence
         self.detection_type = detection_type
@@ -59,7 +59,7 @@ class Detection:
 class TemplateDetector(BaseDetector):
     """Template matching detector with color pre-filtering."""
 
-    def __init__(self, config: DetectionConfig, area_type: str):
+    def __init__(self, config: DetectionConfig, area_type: str) -> None:
         super().__init__(config)
 
         if area_type not in SUPPORTED_AREA_TYPES:
@@ -163,7 +163,7 @@ class TemplateDetector(BaseDetector):
                 detections.extend(region_detections)
 
             # Stage 3: Post-processing
-            filtered_detections = self._post_process_detections(detections, frame.shape)
+            filtered_detections = self._post_process_detections(detections)
 
             # Create result
             detection_time = time.time() - start_time
@@ -342,9 +342,7 @@ class TemplateDetector(BaseDetector):
             template, (new_width, new_height), interpolation=cv2.INTER_AREA
         )
 
-    def _post_process_detections(
-        self, detections: list[Detection], frame_shape: tuple
-    ) -> list[Detection]:
+    def _post_process_detections(self, detections: list[Detection]) -> list[Detection]:
         """Post-process detections to remove duplicates and apply filters."""
         if not detections:
             return []
@@ -425,7 +423,7 @@ class TemplateDetector(BaseDetector):
         logger.info("Created %d templates", len(self.templates))
 
     def _learn_color_profiles_from_annotations(
-        self, annotations: list[SensitiveArea]
+        self, _annotations: list[SensitiveArea]
     ) -> None:
         """Learn color profiles from annotated regions."""
         # This would analyze the color distribution in annotated regions

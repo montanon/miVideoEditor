@@ -11,6 +11,12 @@ import numpy as np
 
 from mivideoeditor.core.models import DetectionResult, SensitiveArea
 
+# Constants for frame validation
+MIN_FRAME_CHANNELS = 1
+STANDARD_RGB_CHANNELS = 3
+RGBA_CHANNELS = 4
+VALID_FRAME_CHANNELS = [MIN_FRAME_CHANNELS, STANDARD_RGB_CHANNELS, RGBA_CHANNELS]
+
 
 class DetectionConfig:
     """Configuration for detection algorithms."""
@@ -26,7 +32,7 @@ class DetectionConfig:
         *,
         enable_motion_tracking: bool = True,
         enable_temporal_filtering: bool = True,
-    ):
+    ) -> None:
         self.frame_step = frame_step
         self.confidence_threshold = confidence_threshold
         self.max_regions_per_frame = max_regions_per_frame
@@ -65,7 +71,7 @@ class DetectionConfig:
 class BaseDetector(ABC):
     """Abstract base class for all detection algorithms."""
 
-    def __init__(self, config: DetectionConfig):
+    def __init__(self, config: DetectionConfig) -> None:
         self.config = config
         self.is_trained = False
         self.detection_stats = {
@@ -151,8 +157,13 @@ class BaseDetector(ABC):
             msg = f"Frame must be 2D or 3D array, got {frame.ndim}D"
             raise ValueError(msg)
 
-        if frame.ndim == 3 and frame.shape[2] not in [1, 3, 4]:
-            msg = f"Frame must have 1, 3, or 4 channels, got {frame.shape[2]}"
+        if (
+            frame.ndim == STANDARD_RGB_CHANNELS
+            and frame.shape[2] not in VALID_FRAME_CHANNELS
+        ):
+            msg = (
+                f"Frame must have {VALID_FRAME_CHANNELS} channels, got {frame.shape[2]}"
+            )
             raise ValueError(msg)
 
     def save_model(self, path: Path) -> None:
@@ -199,7 +210,7 @@ class BaseDetector(ABC):
 class DetectionError(Exception):
     """Base exception for detection-related errors."""
 
-    def __init__(self, message: str, error_code: str | None = None):
+    def __init__(self, message: str, error_code: str | None = None) -> None:
         super().__init__(message)
         self.error_code = error_code
 
@@ -225,10 +236,26 @@ def create_detection_result_empty(timestamp: float = 0.0) -> DetectionResult:
 
 def validate_detection_config(config: DetectionConfig) -> None:
     """Validate detection configuration comprehensively."""
-    # This calls the internal validation, but can be extended
-    config._validate_config()
+    # Validate basic configuration
+    if not 0.0 < config.confidence_threshold <= 1.0:
+        msg = (
+            f"confidence_threshold must be in (0, 1], got {config.confidence_threshold}"
+        )
+        raise ValueError(msg)
 
-    # Additional validation can be added here
+    if config.frame_step < 1:
+        msg = f"frame_step must be >= 1, got {config.frame_step}"
+        raise ValueError(msg)
+
+    if config.max_regions_per_frame < 1:
+        msg = f"max_regions_per_frame must be >= 1, got {config.max_regions_per_frame}"
+        raise ValueError(msg)
+
+    if config.min_detection_area < 1:
+        msg = f"min_detection_area must be >= 1, got {config.min_detection_area}"
+        raise ValueError(msg)
+
+    # Additional validation
     if config.template_scales and not all(s > 0 for s in config.template_scales):
         msg = "All template scales must be positive"
         raise ValueError(msg)

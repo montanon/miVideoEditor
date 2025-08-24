@@ -11,7 +11,20 @@ import numpy as np
 from pydantic import BaseModel, Field, field_validator
 
 from mivideoeditor.core.models import SensitiveArea
-from mivideoeditor.detection.base import TrainingError
+from mivideoeditor.detection.base import BaseDetector, TrainingError
+
+# Training quality thresholds
+EXCELLENT_ACCURACY_THRESHOLD = 0.9
+EXCELLENT_TEMPLATE_COUNT = 5
+GOOD_ACCURACY_THRESHOLD = 0.8
+GOOD_TEMPLATE_COUNT = 3
+FAIR_ACCURACY_THRESHOLD = 0.7
+MIN_TEMPLATE_RECOMMENDATION = 3
+REVIEW_ACCURACY_THRESHOLD = 0.8
+SLOW_TRAINING_THRESHOLD = 300  # 5 minutes
+
+# Template generation constants
+RGB_CHANNELS = 3
 
 logger = logging.getLogger(__name__)
 
@@ -219,10 +232,10 @@ class TrainingDataProcessor(BaseModel):
         training_data: dict[str, list[SensitiveArea]] = {}
         validation_data: dict[str, list[SensitiveArea]] = {}
 
-        for area_type, annotations in grouped_annotations.items():
+        for area_type, area_annotations in grouped_annotations.items():
             # Shuffle annotations (deterministically)
             sorted_annotations = sorted(
-                annotations, key=lambda x: x.id
+                area_annotations, key=lambda x: x.id
             )  # Deterministic ordering
 
             # Calculate split point
@@ -260,11 +273,11 @@ class TemplateTrainer(BaseModel):
         """Generate templates from training annotations."""
         templates = {}
 
-        for area_type, annotations in training_data.items():
+        for area_type, training_annotations in training_data.items():
             logger.info(
                 "Generating templates for %s from %d annotations",
                 area_type,
-                len(annotations),
+                len(training_annotations),
             )
 
             # Placeholder template generation
@@ -277,7 +290,7 @@ class TemplateTrainer(BaseModel):
             type_templates = []
 
             for i, annotation in enumerate(
-                annotations[: self.config.max_templates_per_type]
+                training_annotations[: self.config.max_templates_per_type]
             ):
                 # Create placeholder template based on bounding box size
                 width = annotation.bounding_box.width
@@ -287,7 +300,7 @@ class TemplateTrainer(BaseModel):
                 template_width = min(max(width, 50), 200)
                 template_height = min(max(height, 30), 150)
 
-                # Create synthetic template (in reality, this would be extracted from frame)
+                # Create synthetic template (extracted from frame in practice)
                 template = self._create_synthetic_template(
                     template_width, template_height, area_type, i
                 )
@@ -363,7 +376,7 @@ class TemplateTrainer(BaseModel):
     def _apply_template_optimizations(self, template: np.ndarray) -> np.ndarray:
         """Apply optimization techniques to a single template."""
         # Convert to grayscale for template matching
-        if len(template.shape) == 3:
+        if len(template.shape) == RGB_CHANNELS:
             # Simple RGB to grayscale conversion
             grayscale = np.dot(template[..., :3], [0.299, 0.587, 0.114])
             template = grayscale.astype(np.uint8)
@@ -419,7 +432,7 @@ class DetectorTrainer(BaseModel):
 
         arbitrary_types_allowed = True
 
-    def __init__(self, config: TrainingConfig | None = None):
+    def __init__(self, config: TrainingConfig | None = None) -> None:
         """Initialize detector trainer."""
         config = config or TrainingConfig()
         super().__init__(
@@ -429,7 +442,10 @@ class DetectorTrainer(BaseModel):
         )
 
     def train_detector(
-        self, detector, annotations: list[SensitiveArea], save_path: Path | None = None
+        self,
+        detector: BaseDetector,
+        annotations: list[SensitiveArea],
+        save_path: Path | None = None,
     ) -> TrainingResult:
         """Train a detector with annotations."""
         start_time = time.time()
@@ -490,7 +506,7 @@ class DetectorTrainer(BaseModel):
         except Exception as e:
             training_time = time.time() - start_time
             error_msg = f"Training failed: {e}"
-            logger.error(error_msg)
+            logger.exception(error_msg)
 
             return TrainingResult(
                 success=False,
@@ -502,7 +518,7 @@ class DetectorTrainer(BaseModel):
             )
 
     def _calculate_validation_accuracy(
-        self, detector, validation_data: dict[str, list[SensitiveArea]]
+        self, _detector: BaseDetector, validation_data: dict[str, list[SensitiveArea]]
     ) -> dict[str, float]:
         """Calculate validation accuracy for each area type."""
         # This is a simplified placeholder implementation
@@ -554,27 +570,33 @@ class DetectorTrainer(BaseModel):
         }
 
         # Quality assessment
-        if avg_accuracy >= 0.9 and total_templates >= 5:
+        if (
+            avg_accuracy >= EXCELLENT_ACCURACY_THRESHOLD
+            and total_templates >= EXCELLENT_TEMPLATE_COUNT
+        ):
             evaluation["overall_quality"] = "excellent"
-        elif avg_accuracy >= 0.8 and total_templates >= 3:
+        elif (
+            avg_accuracy >= GOOD_ACCURACY_THRESHOLD
+            and total_templates >= GOOD_TEMPLATE_COUNT
+        ):
             evaluation["overall_quality"] = "good"
-        elif avg_accuracy >= 0.7:
+        elif avg_accuracy >= FAIR_ACCURACY_THRESHOLD:
             evaluation["overall_quality"] = "fair"
         else:
             evaluation["overall_quality"] = "poor"
 
         # Recommendations
-        if total_templates < 3:
+        if total_templates < MIN_TEMPLATE_RECOMMENDATION:
             evaluation["recommendations"].append(
                 "Consider collecting more training data"
             )
 
-        if avg_accuracy < 0.8:
+        if avg_accuracy < REVIEW_ACCURACY_THRESHOLD:
             evaluation["recommendations"].append(
                 "Review annotation quality and consistency"
             )
 
-        if result.training_time_seconds > 300:  # 5 minutes
+        if result.training_time_seconds > SLOW_TRAINING_THRESHOLD:
             evaluation["recommendations"].append(
                 "Training time is high, consider optimization"
             )

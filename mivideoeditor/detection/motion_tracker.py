@@ -10,6 +10,13 @@ from pydantic import BaseModel, Field, field_validator
 from mivideoeditor.core.models import BoundingBox
 from mivideoeditor.detection.base import DetectionConfig
 
+# Motion tracking constants
+MIN_DETECTIONS_FOR_VELOCITY = 2
+MIN_DETECTIONS_FOR_ACCELERATION = 3
+FRAMES_UNTIL_OCCLUDED = 3
+FRAMES_UNTIL_LOST = 10
+MAX_FRAMES_FOR_PREDICTION = 5
+
 logger = logging.getLogger(__name__)
 
 
@@ -166,7 +173,7 @@ class Track(BaseModel):
         current_timestamp: float,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
         """Calculate velocity and acceleration from position history."""
-        if len(detections) < 2:
+        if len(detections) < MIN_DETECTIONS_FOR_VELOCITY:
             return (0.0, 0.0), (0.0, 0.0)
 
         # Calculate velocity from last two positions
@@ -190,7 +197,7 @@ class Track(BaseModel):
 
         # Calculate acceleration if we have enough history
         new_acceleration = self.acceleration
-        if len(detections) >= 3:
+        if len(detections) >= MIN_DETECTIONS_FOR_ACCELERATION:
             prev_dt = timestamps[-2] - timestamps[-3]
             if prev_dt > 0:
                 prev_prev_pos = detections[-3]
@@ -221,9 +228,9 @@ class Track(BaseModel):
         new_frames_since_update = self.frames_since_update + 1
 
         # Update state based on how long since last update
-        if new_frames_since_update > 10:
+        if new_frames_since_update > FRAMES_UNTIL_LOST:
             new_state = "lost"
-        elif new_frames_since_update > 3:
+        elif new_frames_since_update > FRAMES_UNTIL_OCCLUDED:
             new_state = "occluded"
         else:
             new_state = self.state
@@ -300,9 +307,7 @@ class MotionTracker(BaseModel):
         predictions = self._predict_track_positions(timestamp)
 
         # Step 2: Associate detections with existing tracks
-        associations = self._associate_detections_to_tracks(
-            detections, predictions, timestamp
-        )
+        associations = self._associate_detections_to_tracks(detections, predictions)
 
         # Step 3: Update associated tracks
         updated_tracks = dict(self.active_tracks.items())
@@ -433,7 +438,6 @@ class MotionTracker(BaseModel):
         self,
         detections: list[tuple[BoundingBox, float]],
         predictions: dict[int, BoundingBox],
-        timestamp: float,
     ) -> list[tuple[tuple[BoundingBox, float], int]]:
         """Associate detections to tracks using distance-based matching."""
         if not predictions or not detections:
@@ -504,7 +508,10 @@ class MotionTracker(BaseModel):
                 continue
 
             # Use predicted position if track was lost recently
-            if track.state in ["occluded", "lost"] and track.frames_since_update <= 5:
+            if (
+                track.state in ["occluded", "lost"]
+                and track.frames_since_update <= MAX_FRAMES_FOR_PREDICTION
+            ):
                 dt = timestamp - track.last_update_timestamp
                 try:
                     predicted_bbox = track.predict_position(dt)

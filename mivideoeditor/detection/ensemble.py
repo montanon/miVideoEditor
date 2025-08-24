@@ -79,7 +79,7 @@ class EnsembleDetector(BaseDetector):
         detectors: list[BaseDetector],
         config: DetectionConfig,
         ensemble_config: EnsembleConfig | None = None,
-    ):
+    ) -> None:
         super().__init__(config)
 
         if not detectors:
@@ -374,7 +374,7 @@ class EnsembleDetector(BaseDetector):
             # Meta-learner logic (simplified)
             # In practice, this would be a trained model
             meta_confidence = self._calculate_meta_confidence(
-                bbox, conf, detector_type, all_results
+                bbox, detector_type, all_results
             )
 
             final_confidence = conf * weight * meta_confidence
@@ -541,10 +541,9 @@ class EnsembleDetector(BaseDetector):
         bbox: BoundingBox,
         detector_type: str,
         all_results: list[DetectionResult],
-        confidence: float,
     ) -> float:
         """Calculate meta-learner confidence (simplified implementation)."""
-        # Simplified meta-learning: boost confidence if multiple detectors agree on similar region
+        # Simplified meta-learning: boost confidence if multiple detectors agree
         agreement_score = 0.0
 
         for result in all_results:
