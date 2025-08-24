@@ -125,9 +125,9 @@ Available blur filters can be configured in the timeline:
 The system follows a modular pipeline architecture:
 
 ```
-Input Video ’ Scene Marking ’ Frame Extraction ’ Annotation ’
-’ Detector Training ’ Detection ’ Timeline Generation ’
-’ Review/Edit ’ Video Processing ’ Output Video
+Input Video Â’ Scene Marking Â’ Frame Extraction Â’ Annotation Â’
+Â’ Detector Training Â’ Detection Â’ Timeline Generation Â’
+Â’ Review/Edit Â’ Video Processing Â’ Output Video
 ```
 
 Each stage produces artifacts that can be reviewed and modified before proceeding.
