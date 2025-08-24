@@ -19,6 +19,8 @@ class ValidationUtils:
     @staticmethod
     def validate_bounding_box(
         bbox: BoundingBox,
+        container_width: int | None = None,
+        container_height: int | None = None,
         frame_size: tuple[int, int] | None = None,
         min_area: int = 1,
         max_area: int | None = None,
@@ -26,26 +28,34 @@ class ValidationUtils:
         """Comprehensive bounding box validation."""
         result = ValidationResult(is_valid=True)
 
-        # Basic dimension validation (handled by Pydantic, but double-check)
-        if bbox.width <= 0 or bbox.height <= 0:
-            result.add_error(
-                f"Invalid dimensions: {bbox.width}x{bbox.height} (must be > 0)"
-            )
+        # Add context information
+        area = bbox.area
+        result.context["area"] = area
+        result.context["width"] = bbox.width
+        result.context["height"] = bbox.height
+
+        # Basic dimension validation
+        if bbox.width <= 0:
+            result.add_error("Width must be positive")
+
+        if bbox.height <= 0:
+            result.add_error("Height must be positive")
 
         # Coordinate validation
-        if bbox.x < 0 or bbox.y < 0:
-            result.add_error(f"Negative coordinates: ({bbox.x}, {bbox.y})")
+        if bbox.x < 0:
+            result.add_error("X coordinate must be non-negative")
 
-        # Area validation
-        area = bbox.area
-        if area < min_area:
-            result.add_error(f"Area too small: {area} pixels (minimum {min_area})")
+        if bbox.y < 0:
+            result.add_error("Y coordinate must be non-negative")
 
-        if max_area is not None and area > max_area:
-            result.add_error(f"Area too large: {area} pixels (maximum {max_area})")
+        # Container boundary validation (using either container_width/height or frame_size)
+        if container_width is not None and container_height is not None:
+            if bbox.x + bbox.width > container_width:
+                result.add_error("Bounding box extends beyond container")
+            if bbox.y + bbox.height > container_height:
+                result.add_error("Bounding box extends beyond container")
 
-        # Frame boundary validation
-        if frame_size is not None:
+        elif frame_size is not None:
             frame_width, frame_height = frame_size
 
             if bbox.x >= frame_width:
@@ -68,7 +78,15 @@ class ValidationUtils:
                     f"{bbox.y + bbox.height} > {frame_height}"
                 )
 
-            # Aspect ratio warnings for extreme cases
+        # Area validation
+        if area < min_area:
+            result.add_error(f"Area too small: {area} pixels (minimum {min_area})")
+
+        if max_area is not None and area > max_area:
+            result.add_error(f"Area too large: {area} pixels (maximum {max_area})")
+
+        # Aspect ratio warnings for extreme cases
+        if bbox.width > 0 and bbox.height > 0:
             aspect_ratio = bbox.width / bbox.height
             if aspect_ratio > 10:
                 result.add_warning(f"Very wide aspect ratio: {aspect_ratio:.1f}:1")
@@ -111,7 +129,9 @@ class ValidationUtils:
 
     @staticmethod
     def validate_timestamp(
-        timestamp: float,
+        timestamp: Any,
+        min_timestamp: float | None = None,
+        max_timestamp: float | None = None,
         video_duration: float | None = None,
         *,
         allow_negative: bool = False,
@@ -119,9 +139,28 @@ class ValidationUtils:
         """Validate video timestamp values."""
         result = ValidationResult(is_valid=True)
 
+        # Add context information
+        result.context["timestamp"] = timestamp
+
+        # Type validation
+        try:
+            timestamp = float(timestamp)
+        except (ValueError, TypeError):
+            result.add_error(
+                f"Timestamp must be a number, got {type(timestamp).__name__}"
+            )
+            return result
+
         # Basic range validation
         if not allow_negative and timestamp < 0:
-            result.add_error(f"Negative timestamp not allowed: {timestamp}")
+            result.add_error("Timestamp cannot be negative")
+
+        # Min/max timestamp validation
+        if min_timestamp is not None and timestamp < min_timestamp:
+            result.add_error(f"Timestamp must be at least {min_timestamp}")
+
+        if max_timestamp is not None and timestamp > max_timestamp:
+            result.add_error(f"Timestamp must be at most {max_timestamp}")
 
         # Video duration bounds
         if video_duration is not None:
@@ -217,8 +256,9 @@ class ValidationUtils:
     @staticmethod
     def validate_file_path(
         file_path: Union[str, Path],
-        allowed_extensions: list[str] | None = None,
+        allowed_extensions: set[str] | None = None,
         max_size_bytes: int | None = None,
+        min_size_bytes: int | None = None,
         *,
         must_exist: bool = True,
     ) -> ValidationResult:
@@ -232,37 +272,53 @@ class ValidationUtils:
             result.add_error(f"Invalid path format: {e}")
             return result
 
+        # Add context information
+        exists = path.exists()
+        result.context["exists"] = exists
+
+        if exists:
+            is_file = path.is_file()
+            result.context["is_file"] = is_file
+
+            if is_file:
+                try:
+                    file_size = path.stat().st_size
+                    result.context["file_size"] = file_size
+                except OSError:
+                    result.context["file_size"] = 0
+
         # Existence check
-        if must_exist and not path.exists():
-            result.add_error(f"File does not exist: {path}")
+        if must_exist and not exists:
+            result.add_error("File does not exist")
             return result
 
-        if path.exists():
+        if exists:
             # File type validation
             if not path.is_file():
-                result.add_error(f"Path is not a file: {path}")
+                result.add_error("Path is a directory, not a file")
+                return result
 
             # Extension validation
             if allowed_extensions is not None:
                 extension = path.suffix.lower()
-                if extension not in [ext.lower() for ext in allowed_extensions]:
-                    result.add_error(
-                        f"File extension '{extension}' not allowed. "
-                        f"Allowed: {allowed_extensions}"
-                    )
+                if extension not in {ext.lower() for ext in allowed_extensions}:
+                    result.add_error(f"Extension '{extension}' not allowed")
 
             # Size validation
-            if max_size_bytes is not None:
-                try:
-                    file_size = path.stat().st_size
-                    if file_size > max_size_bytes:
-                        size_mb = file_size / (1024 * 1024)
-                        max_mb = max_size_bytes / (1024 * 1024)
-                        result.add_error(
-                            f"File too large: {size_mb:.1f}MB (maximum {max_mb:.1f}MB)"
-                        )
-                except OSError as e:
-                    result.add_error(f"Cannot check file size: {e}")
+            try:
+                file_size = path.stat().st_size
+
+                if min_size_bytes is not None and file_size < min_size_bytes:
+                    result.add_error(
+                        f"File is smaller than minimum {min_size_bytes} bytes"
+                    )
+
+                if max_size_bytes is not None and file_size > max_size_bytes:
+                    result.add_error(
+                        f"File is larger than maximum {max_size_bytes} bytes"
+                    )
+            except OSError as e:
+                result.add_error(f"Cannot check file size: {e}")
 
         # Path security validation
         path_str = str(path.resolve())
@@ -307,13 +363,21 @@ class ValidationUtils:
         result = ValidationResult(is_valid=True)
 
         # Required fields
-        required_fields = ["timestamp", "bounding_box", "area_type"]
+        required_fields = ["id", "timestamp", "bounding_box"]
         for field in required_fields:
             if field not in annotation_data:
-                result.add_error(f"Missing required field: {field}")
+                result.add_error(f"Missing required key: {field}")
 
         if not result.is_valid:
             return result
+
+        # Validate id field type
+        if "id" in annotation_data:
+            id_value = annotation_data["id"]
+            if not isinstance(id_value, str):
+                result.add_error(
+                    f"Key 'id' should be <class 'str'>, got {type(id_value)}"
+                )
 
         # Validate timestamp
         try:
@@ -345,10 +409,11 @@ class ValidationUtils:
         else:
             result.add_error("Bounding box must be a dictionary")
 
-        # Validate area type
-        area_type = annotation_data.get("area_type", "")
-        area_type_result = ValidationUtils.validate_area_type(area_type)
-        result = result.merge(area_type_result)
+        # Validate area type (if present)
+        if "type" in annotation_data:
+            area_type = annotation_data["type"]
+            area_type_result = ValidationUtils.validate_area_type(area_type)
+            result = result.merge(area_type_result)
 
         # Validate optional confidence
         if "confidence" in annotation_data:
@@ -359,6 +424,19 @@ class ValidationUtils:
             except (ValueError, TypeError):
                 result.add_error(
                     f"Invalid confidence format: {annotation_data['confidence']}"
+                )
+
+        # Validate optional blur strength
+        if "blur_strength" in annotation_data:
+            try:
+                strength = float(annotation_data["blur_strength"])
+                if not 0.0 <= strength <= 2.0:
+                    result.add_error(
+                        f"Blur strength must be between 0.0 and 2.0, got {strength}"
+                    )
+            except (ValueError, TypeError):
+                result.add_error(
+                    f"Invalid blur strength: {annotation_data['blur_strength']}"
                 )
 
         # Validate optional metadata
@@ -376,20 +454,40 @@ class ValidationUtils:
         """Validate processing configuration data."""
         result = ValidationResult(is_valid=True)
 
+        # Processing mode validation
+        if "processing_mode" in config_data:
+            processing_mode = config_data["processing_mode"]
+            valid_processing_modes = ["fast", "balanced", "maximum"]
+            if processing_mode not in valid_processing_modes:
+                result.add_error(
+                    f"Invalid processing mode: {processing_mode}. Valid: {valid_processing_modes}"
+                )
+
         # Quality mode validation
         quality_mode = config_data.get("quality_mode", "balanced")
-        valid_modes = ["fast", "balanced", "high", "maximum"]
+        valid_modes = ["fast", "balanced", "medium", "high", "maximum"]
         if quality_mode not in valid_modes:
             result.add_error(
                 f"Invalid quality mode: {quality_mode}. Valid: {valid_modes}"
             )
+
+        # Chunk size validation
+        if "chunk_size" in config_data:
+            try:
+                chunk_size = int(config_data["chunk_size"])
+                if chunk_size <= 0:
+                    result.add_error("chunk_size must be positive")
+                elif chunk_size < 30:  # Less than 1 second at 30fps
+                    result.add_warning(f"Very small chunk size: {chunk_size}")
+            except (ValueError, TypeError):
+                result.add_error(f"Invalid chunk size: {config_data['chunk_size']}")
 
         # Frame step validation
         if "frame_step" in config_data:
             try:
                 frame_step = int(config_data["frame_step"])
                 if frame_step < 1:
-                    result.add_error(f"Frame step must be >= 1, got: {frame_step}")
+                    result.add_error("frame_step must be positive")
                 elif frame_step > 300:  # 10 seconds at 30fps
                     result.add_warning(f"Very large frame step: {frame_step}")
             except (ValueError, TypeError):
@@ -580,11 +678,358 @@ class ValidationUtils:
                     result.context["hardware_encoders_available"] = True
 
         except ImportError:
-            result.add_warning("System utilities not available for optimization checks")
+            result.add_warning("System utilities not available")
         except (OSError, RuntimeError, AttributeError) as e:
             result.add_warning(f"System validation failed: {e}")
 
         return result
+
+    @staticmethod
+    def validate_string(
+        value: Any,
+        min_length: int | None = None,
+        max_length: int | None = None,
+        pattern: str | None = None,
+        context: str | None = None,
+        field_name: str | None = None,
+        *,
+        allow_empty: bool = False,
+    ) -> ValidationResult:
+        """Validate a string value with various constraints."""
+        result = ValidationResult(is_valid=True)
+
+        # Add context information
+        if field_name:
+            result.context["field_name"] = field_name
+        result.context["value_type"] = type(value).__name__
+        if isinstance(value, str):
+            result.context["value_length"] = len(value)
+
+        # Type validation
+        if not isinstance(value, str):
+            result.add_error(f"Value must be a string, got {type(value).__name__}")
+            return result
+
+        # Empty string validation
+        if not value and not allow_empty:
+            result.add_error("String cannot be empty")
+            return result
+
+        # Length validation
+        if min_length is not None and len(value) < min_length:
+            result.add_error(f"String must be at least {min_length} characters long")
+
+        if max_length is not None and len(value) > max_length:
+            result.add_error(f"String must be at most {max_length} characters long")
+
+        # Pattern validation
+        if pattern is not None:
+            try:
+                if not re.match(pattern, value):
+                    result.add_error(
+                        f"String does not match required pattern: {pattern}"
+                    )
+            except re.error as e:
+                msg = f"Invalid regex pattern: {e}"
+                raise ValueError(msg) from e
+
+        # Context-specific validation
+        if context == "filename":
+            if re.search(r'[<>:"|?*\\\/]', value):
+                result.add_error("String contains invalid filename characters")
+        elif context == "identifier":
+            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", value):
+                result.add_error("String is not a valid identifier")
+
+        return result
+
+    @staticmethod
+    def validate_numeric(
+        value: Any,
+        min_value: float | None = None,
+        max_value: float | None = None,
+        *,
+        integer_only: bool = False,
+        allow_zero: bool = True,
+        allow_negative: bool = True,
+    ) -> ValidationResult:
+        """Validate a numeric value with various constraints."""
+        result = ValidationResult(is_valid=True)
+
+        # Type validation
+        try:
+            if integer_only:
+                if not isinstance(value, int) or isinstance(value, bool):
+                    # Check if it's a float that's not a whole number
+                    if isinstance(value, float):
+                        if value != int(value):
+                            result.add_error(
+                                f"Value must be an integer, got float: {value}"
+                            )
+                            return result
+                        value = int(value)
+                    else:
+                        result.add_error(
+                            f"Value must be an integer, got {type(value).__name__}"
+                        )
+                        return result
+            else:
+                value = float(value)
+        except (ValueError, TypeError):
+            result.add_error(f"Value must be a number, got {type(value).__name__}")
+            return result
+
+        # Range validation
+        if min_value is not None and value < min_value:
+            result.add_error(f"Value must be at least {min_value}")
+
+        if max_value is not None and value > max_value:
+            result.add_error(f"Value must be at most {max_value}")
+
+        # Zero validation
+        if not allow_zero and value == 0:
+            result.add_error("Value cannot be zero")
+
+        # Negative validation
+        if not allow_negative and value < 0:
+            result.add_error("Value cannot be negative")
+
+        return result
+
+    @staticmethod
+    def validate_list(
+        value: Any,
+        min_length: int | None = None,
+        max_length: int | None = None,
+        item_type: type | None = None,
+        *,
+        allow_empty: bool = True,
+    ) -> ValidationResult:
+        """Validate a list with various constraints."""
+        result = ValidationResult(is_valid=True)
+
+        # Type validation
+        if not isinstance(value, list):
+            result.add_error(f"Value must be a list, got {type(value).__name__}")
+            return result
+
+        # Empty list validation
+        if not value and not allow_empty:
+            result.add_error("List cannot be empty")
+            return result
+
+        # Length validation
+        if min_length is not None and len(value) < min_length:
+            result.add_error(f"List must have at least {min_length} items")
+
+        if max_length is not None and len(value) > max_length:
+            result.add_error(f"List must have at most {max_length} items")
+
+        # Item type validation
+        if item_type is not None:
+            for i, item in enumerate(value):
+                if not isinstance(item, item_type):
+                    result.add_error(
+                        f"Item {i} is not of type {item_type.__name__}, "
+                        f"got {type(item).__name__}"
+                    )
+
+        return result
+
+    @staticmethod
+    def validate_dict(
+        value: Any,
+        required_keys: list[str] | None = None,
+        allowed_keys: list[str] | None = None,
+        key_types: dict[str, type] | None = None,
+        *,
+        allow_empty: bool = True,
+    ) -> ValidationResult:
+        """Validate a dictionary with various constraints."""
+        result = ValidationResult(is_valid=True)
+
+        # Type validation
+        if not isinstance(value, dict):
+            result.add_error(f"Value must be a dictionary, got {type(value).__name__}")
+            return result
+
+        # Empty dict validation
+        if not value and not allow_empty:
+            result.add_error("Dictionary cannot be empty")
+            return result
+
+        # Required keys validation
+        if required_keys:
+            for key in required_keys:
+                if key not in value:
+                    result.add_error(f"Missing required key: {key}")
+
+        # Allowed keys validation
+        if allowed_keys:
+            for key in value:
+                if key not in allowed_keys:
+                    result.add_error(f"Unexpected key: {key}")
+
+        # Key type validation
+        if key_types:
+            for key, expected_type in key_types.items():
+                if key in value and not isinstance(value[key], expected_type):
+                    result.add_error(
+                        f"Key '{key}' should be {expected_type.__name__}, "
+                        f"got {type(value[key]).__name__}"
+                    )
+
+        return result
+
+    @staticmethod
+    def validate_color_tuple(
+        value: Any,
+        channels: int = 3,
+        max_value: int = 255,
+        color_space: str = "RGB",
+    ) -> ValidationResult:
+        """Validate a color tuple (RGB, BGR, HSV, etc.)."""
+        result = ValidationResult(is_valid=True)
+
+        # Add context information
+        result.context["color_space"] = color_space
+        result.context["channels"] = channels
+        result.context["max_value"] = max_value
+
+        # Type validation - must be tuple, not list
+        if not isinstance(value, tuple):
+            result.add_error(f"Color must be a tuple, got {type(value).__name__}")
+            return result
+
+        # Channel count validation
+        if len(value) != channels:
+            result.add_error(
+                f"Color must have exactly {channels} components, got {len(value)}"
+            )
+            return result
+
+        # Value validation based on color space
+        if color_space.upper() in ["RGB", "BGR"]:
+            for i, channel in enumerate(value):
+                if not isinstance(channel, int):
+                    result.add_error(
+                        f"Color components must be integers, got {type(channel).__name__}"
+                    )
+                    return result
+                elif not 0 <= channel <= max_value:
+                    result.add_error(
+                        f"Color components must be between 0 and {max_value}, got {channel}"
+                    )
+                    return result
+        elif color_space.upper() == "HSV":
+            # Hue: 0-179 (OpenCV standard), Saturation: 0-255, Value: 0-255
+            if not 0 <= value[0] <= 179:
+                result.add_error(f"Hue must be between 0 and 179, got {value[0]}")
+            if not 0 <= value[1] <= 255:
+                result.add_error("Saturation must be between 0 and 255")
+            if not 0 <= value[2] <= 255:
+                result.add_error("Value must be between 0 and 255")
+
+        return result
+
+    @staticmethod
+    def validate_confidence_score(
+        value: Any,
+        min_threshold: float = 0.0,
+        max_threshold: float = 1.0,
+    ) -> ValidationResult:
+        """Validate a confidence score (typically 0.0 to 1.0)."""
+        result = ValidationResult(is_valid=True)
+
+        # Type validation
+        try:
+            score = float(value)
+        except (ValueError, TypeError):
+            result.add_error(
+                f"Confidence score must be a number, got {type(value).__name__}"
+            )
+            return result
+
+        # Range validation
+        if not min_threshold <= score <= max_threshold:
+            result.add_error(
+                f"Confidence score must be between {min_threshold} and {max_threshold}, "
+                f"got {score}"
+            )
+
+        # Warning for extreme values
+        if score == 0.0:
+            result.add_warning("Confidence score is 0.0 (no confidence)")
+        elif score == 1.0:
+            result.add_warning("Confidence score is 1.0 (perfect confidence)")
+        elif score < 0.3:
+            result.add_warning(f"Low confidence score: {score}")
+
+        return result
+
+    @staticmethod
+    def batch_validate(validators):
+        """Validate a batch of validators (functions that return ValidationResults)."""
+        if isinstance(validators, dict):
+            # Handle dictionary of validators
+            results = {}
+            for label, validator in validators.items():
+                try:
+                    result = validator()
+                    result.context["label"] = label
+                except Exception as e:
+                    result = ValidationResult(is_valid=False)
+                    result.add_error(f"Validation failed for {label}: {e}")
+                results[label] = result
+            return results
+
+        results = []
+        for i, validator in enumerate(validators):
+            label = f"Item {i}"
+            try:
+                result = validator()
+                result.context["label"] = label
+            except Exception as e:
+                result = ValidationResult(is_valid=False)
+                result.add_error(f"Validation failed for {label}: {e}")
+            results.append(result)
+        return results
+
+    @staticmethod
+    def create_combined_result(
+        results: list[ValidationResult],
+        *,
+        require_all_valid: bool = True,
+    ) -> ValidationResult:
+        """Combine multiple ValidationResults into a single result."""
+        combined = ValidationResult(is_valid=True)
+
+        valid_count = 0
+        total_count = len(results)
+
+        for i, result in enumerate(results):
+            if result.is_valid:
+                valid_count += 1
+
+            # Merge errors and warnings (preserve original messages)
+            for error in result.errors:
+                combined.add_error(error)
+
+            for warning in result.warnings:
+                combined.add_warning(warning)
+
+        # Update validity based on requirement
+        if require_all_valid:
+            combined.is_valid = valid_count == total_count
+        else:
+            combined.is_valid = valid_count > 0
+
+        # Add summary to context
+        combined.context["valid_count"] = valid_count
+        combined.context["total_count"] = total_count
+        combined.context["invalid_count"] = total_count - valid_count
+
+        return combined
 
     @staticmethod
     def validate_macos_video_processing_setup() -> ValidationResult:
