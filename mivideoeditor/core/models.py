@@ -9,7 +9,11 @@ from typing import Any, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from mivideoeditor.core.constants import SUPPORTED_AREA_TYPES
+from mivideoeditor.core.constants import (
+    BLUR_FILTER_TYPES,
+    INTERPOLATION_MODES,
+    SUPPORTED_AREA_TYPES,
+)
 
 
 class BoundingBox(BaseModel):
@@ -484,9 +488,7 @@ class DetectionResult(BaseModel):
     def filter_by_confidence(self, threshold: float) -> DetectionResult:
         """Filter detections by confidence threshold."""
         filtered = [
-            detection
-            for detection in self.detections
-            if detection[1] >= threshold
+            detection for detection in self.detections if detection[1] >= threshold
         ]
 
         return DetectionResult(
@@ -500,9 +502,7 @@ class DetectionResult(BaseModel):
     def filter_by_area_type(self, area_type: str) -> DetectionResult:
         """Filter detections by area type."""
         filtered = [
-            detection
-            for detection in self.detections
-            if detection[2] == area_type
+            detection for detection in self.detections if detection[2] == area_type
         ]
 
         return DetectionResult(
@@ -577,4 +577,212 @@ class DetectionResult(BaseModel):
             f"DetectionResult(detections={self.detection_count}, "
             f"detector={self.detector_type}, timestamp={self.timestamp}, "
             f"time={self.detection_time:.3f}s)"
+        )
+
+
+class BlurRegion(BaseModel):
+    """Represents a temporal region to be blurred in the final video."""
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique identifier (UUID4)",
+    )
+    start_time: float = Field(..., ge=0, description="Start timestamp (seconds)")
+    end_time: float = Field(..., ge=0, description="End timestamp (seconds)")
+    bounding_box: BoundingBox = Field(..., description="Region to blur")
+    blur_type: str = Field(
+        default="gaussian",
+        description="Filter: gaussian, pixelate, noise, composite",
+    )
+    blur_strength: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=2.0,
+        description="Strength multiplier [0.0, 2.0]",
+    )
+    interpolation: str = Field(
+        default="linear",
+        description="Motion interpolation: linear, smooth, none",
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Detection confidence",
+    )
+    needs_review: bool = Field(
+        default=False,
+        description="Flag for manual review",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional metadata",
+    )
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> Self:
+        """Ensure end_time is after start_time."""
+        if self.end_time <= self.start_time:
+            msg = (
+                f"end_time ({self.end_time}) must be greater than "
+                f"start_time ({self.start_time})"
+            )
+            raise ValueError(msg)
+        return self
+
+    @field_validator("blur_type")
+    @classmethod
+    def validate_blur_type(cls, v: str) -> str:
+        """Validate blur type against supported types."""
+        if v not in BLUR_FILTER_TYPES:
+            supported = list(BLUR_FILTER_TYPES.keys())
+            msg = f"Unsupported blur type: {v}. Must be one of {supported}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("interpolation")
+    @classmethod
+    def validate_interpolation(cls, v: str) -> str:
+        """Validate interpolation mode."""
+        if v not in INTERPOLATION_MODES:
+            modes = INTERPOLATION_MODES
+            msg = f"Unsupported interpolation: {v}. Must be one of {modes}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("id")
+    @classmethod
+    def validate_uuid(cls, v: str) -> str:
+        """Validate UUID format."""
+        try:
+            uuid.UUID(v)
+        except ValueError as e:
+            msg = f"Invalid UUID format: {v}"
+            raise ValueError(msg) from e
+        return v
+
+    @property
+    def duration(self) -> float:
+        """Calculate the duration in seconds."""
+        return self.end_time - self.start_time
+
+    @property
+    def area(self) -> int:
+        """Get the area of the bounding box."""
+        return self.bounding_box.area
+
+    def overlaps_time(self, timestamp: float) -> bool:
+        """Check if timestamp is within this blur region."""
+        return self.start_time <= timestamp <= self.end_time
+
+    def overlaps_time_range(self, start: float, end: float) -> bool:
+        """Check if this region overlaps with a time range."""
+        return not (self.end_time <= start or end <= self.start_time)
+
+    def get_region_at_time(self, timestamp: float) -> BoundingBox:
+        """Get region position at specific timestamp (for motion interpolation)."""
+        if not self.overlaps_time(timestamp):
+            msg = (
+                f"Timestamp {timestamp} not within region "
+                f"{self.start_time}-{self.end_time}"
+            )
+            raise ValueError(msg)
+
+        # For now, return the same bounding box (no motion)
+        # Future enhancement: implement actual motion interpolation
+        return self.bounding_box
+
+    def split_at_time(self, timestamp: float) -> tuple[BlurRegion, BlurRegion]:
+        """Split region at specific timestamp into two regions."""
+        if not (self.start_time < timestamp < self.end_time):
+            msg = (
+                f"Cannot split at {timestamp}, must be within "
+                f"{self.start_time}-{self.end_time}"
+            )
+            raise ValueError(msg)
+
+        first_region = self.model_copy(
+            update={
+                "id": str(uuid.uuid4()),
+                "end_time": timestamp,
+            }
+        )
+
+        second_region = self.model_copy(
+            update={
+                "id": str(uuid.uuid4()),
+                "start_time": timestamp,
+            }
+        )
+
+        return first_region, second_region
+
+    def merge_with(self, other: BlurRegion) -> BlurRegion:
+        """Merge with another overlapping blur region."""
+        if not self.can_merge_with(other):
+            msg = "Cannot merge non-overlapping or incompatible regions"
+            raise ValueError(msg)
+
+        # Take union of bounding boxes
+        merged_bbox = self.bounding_box.union(other.bounding_box)
+
+        return BlurRegion(
+            start_time=min(self.start_time, other.start_time),
+            end_time=max(self.end_time, other.end_time),
+            bounding_box=merged_bbox,
+            blur_type=self.blur_type,  # Keep first region's blur type
+            blur_strength=max(self.blur_strength, other.blur_strength),
+            confidence=min(self.confidence, other.confidence),
+            needs_review=self.needs_review or other.needs_review,
+            metadata={"merged_from": [self.id, other.id]},
+        )
+
+    def can_merge_with(self, other: BlurRegion) -> bool:
+        """Check if this region can be merged with another."""
+        # Must have same blur type and overlapping time
+        return (
+            self.blur_type == other.blur_type
+            and self.overlaps_time_range(other.start_time, other.end_time)
+            and self.bounding_box.overlaps(other.bounding_box)
+        )
+
+    def with_updated_bbox(self, new_bbox: BoundingBox) -> BlurRegion:
+        """Create a copy with updated bounding box."""
+        return self.model_copy(update={"bounding_box": new_bbox})
+
+    def with_updated_strength(self, new_strength: float) -> BlurRegion:
+        """Create a copy with updated blur strength."""
+        return self.model_copy(update={"blur_strength": new_strength})
+
+    @classmethod
+    def from_sensitive_area(
+        cls,
+        area: SensitiveArea,
+        duration: float = 1.0,
+        blur_type: str = "gaussian",
+    ) -> BlurRegion:
+        """Create a BlurRegion from a SensitiveArea."""
+        return cls(
+            start_time=area.timestamp,
+            end_time=area.timestamp + duration,
+            bounding_box=area.bounding_box,
+            blur_type=blur_type,
+            confidence=area.confidence,
+            needs_review=area.needs_review,
+            metadata={"source_area_id": area.id, "area_type": area.area_type},
+        )
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return (
+            f"BlurRegion({self.blur_type} {self.start_time:.1f}-{self.end_time:.1f}s, "
+            f"strength={self.blur_strength:.1f})"
+        )
+
+    def __repr__(self) -> str:
+        """Return detailed representation."""
+        return (
+            f"BlurRegion(id={self.id[:8]}..., time={self.start_time}-{self.end_time}, "
+            f"bbox={self.bounding_box}, type={self.blur_type}, "
+            f"strength={self.blur_strength})"
         )
