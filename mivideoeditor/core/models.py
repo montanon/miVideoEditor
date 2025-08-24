@@ -786,3 +786,259 @@ class BlurRegion(BaseModel):
             f"bbox={self.bounding_box}, type={self.blur_type}, "
             f"strength={self.blur_strength})"
         )
+
+
+class Timeline(BaseModel):
+    """Complete timeline of blur operations for a video."""
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique identifier (UUID4)",
+    )
+    video_path: Path = Field(..., description="Source video file")
+    video_duration: float = Field(..., gt=0, description="Total video length (seconds)")
+    frame_rate: float = Field(
+        default=30.0,
+        gt=0,
+        description="Video frame rate",
+    )
+    blur_regions: list[BlurRegion] = Field(
+        default_factory=list,
+        description="All blur operations",
+    )
+    version: str = Field(default="1.0", description="Version for compatibility")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Creation timestamp",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional timeline metadata",
+    )
+
+    @field_validator("video_path")
+    @classmethod
+    def validate_video_path(cls, v: Path) -> Path:
+        """Validate video path."""
+        # Convert to Path if string, don't check existence as file might not exist yet
+        return Path(v)
+
+    @field_validator("id")
+    @classmethod
+    def validate_uuid(cls, v: str) -> str:
+        """Validate UUID format."""
+        try:
+            uuid.UUID(v)
+        except ValueError as e:
+            msg = f"Invalid UUID format: {v}"
+            raise ValueError(msg) from e
+        return v
+
+    @model_validator(mode="after")
+    def validate_blur_regions(self) -> Self:
+        """Validate blur regions don't exceed video duration."""
+        for region in self.blur_regions:
+            if region.end_time > self.video_duration:
+                msg = (
+                    f"Blur region extends beyond video duration: "
+                    f"{region.end_time} > {self.video_duration}"
+                )
+                raise ValueError(msg)
+        return self
+
+    def get_active_regions(self, timestamp: float) -> list[BlurRegion]:
+        """Get all blur regions active at given timestamp."""
+        return [
+            region for region in self.blur_regions if region.overlaps_time(timestamp)
+        ]
+
+    def get_regions_in_range(
+        self,
+        start_time: float,
+        end_time: float,
+    ) -> list[BlurRegion]:
+        """Get all regions that overlap with time range."""
+        return [
+            region
+            for region in self.blur_regions
+            if region.overlaps_time_range(start_time, end_time)
+        ]
+
+    def add_region(self, region: BlurRegion) -> None:
+        """Add a new blur region."""
+        if region.end_time > self.video_duration:
+            msg = (
+                f"Cannot add region extending beyond video duration: "
+                f"{region.end_time} > {self.video_duration}"
+            )
+            raise ValueError(msg)
+        self.blur_regions.append(region)
+
+    def remove_region(self, region_id: str) -> bool:
+        """Remove a blur region by ID."""
+        for i, region in enumerate(self.blur_regions):
+            if region.id == region_id:
+                del self.blur_regions[i]
+                return True
+        return False
+
+    def total_blur_duration(self) -> float:
+        """Sum of all blur durations (may count overlaps multiple times)."""
+        return sum(region.duration for region in self.blur_regions)
+
+    def blur_coverage_percentage(self) -> float:
+        """Percentage of video that has blur (considering overlaps)."""
+        if self.video_duration == 0:
+            return 0.0
+
+        # Create time segments and mark which are covered
+        segment_size = 0.1  # 100ms segments
+        total_segments = int(self.video_duration / segment_size) + 1
+        covered_segments = set()
+
+        for region in self.blur_regions:
+            start_segment = int(region.start_time / segment_size)
+            end_segment = int(region.end_time / segment_size) + 1
+            for seg in range(start_segment, end_segment):
+                if seg < total_segments:
+                    covered_segments.add(seg)
+
+        return (len(covered_segments) / total_segments) * 100.0
+
+    def optimize(self) -> Timeline:
+        """Create an optimized version by merging overlapping compatible regions."""
+        if not self.blur_regions:
+            return self
+
+        # Group regions by blur type for potential merging
+        optimized_regions: list[BlurRegion] = []
+        remaining_regions = self.blur_regions.copy()
+
+        while remaining_regions:
+            current = remaining_regions.pop(0)
+
+            # Try to merge with other regions
+            merged_any = True
+            while merged_any:
+                merged_any = False
+                for i, other in enumerate(remaining_regions):
+                    if current.can_merge_with(other):
+                        current = current.merge_with(other)
+                        remaining_regions.pop(i)
+                        merged_any = True
+                        break
+
+            optimized_regions.append(current)
+
+        return self.model_copy(
+            update={
+                "id": str(uuid.uuid4()),
+                "blur_regions": optimized_regions,
+                "metadata": {
+                    **self.metadata,
+                    "optimized_from": self.id,
+                    "original_region_count": len(self.blur_regions),
+                },
+            }
+        )
+
+    def validate(self) -> list[str]:
+        """Validate timeline and return list of issues."""
+        issues = []
+
+        # Check for overlapping regions that can't be merged
+        for i, region1 in enumerate(self.blur_regions):
+            for region2 in self.blur_regions[i + 1 :]:
+                if (
+                    region1.overlaps_time_range(region2.start_time, region2.end_time)
+                    and region1.bounding_box.overlaps(region2.bounding_box)
+                    and not region1.can_merge_with(region2)
+                ):
+                    msg = (
+                        f"Incompatible overlapping regions: "
+                        f"{region1.id[:8]} and {region2.id[:8]}"
+                    )
+                    issues.append(msg)
+
+        # Check for regions needing review
+        review_needed = [r for r in self.blur_regions if r.needs_review]
+        if review_needed:
+            issues.append(f"{len(review_needed)} regions need manual review")
+
+        # Check for low confidence regions
+        confidence_threshold = 0.7
+        low_confidence = [
+            r for r in self.blur_regions if r.confidence < confidence_threshold
+        ]
+        if low_confidence:
+            issues.append(
+                f"{len(low_confidence)} regions have low confidence "
+                f"(<{confidence_threshold})"
+            )
+
+        return issues
+
+    @property
+    def region_count(self) -> int:
+        """Get the number of blur regions."""
+        return len(self.blur_regions)
+
+    @property
+    def has_regions(self) -> bool:
+        """Check if timeline has any regions."""
+        return len(self.blur_regions) > 0
+
+    @property
+    def needs_review(self) -> bool:
+        """Check if any regions need review."""
+        return any(region.needs_review for region in self.blur_regions)
+
+    @classmethod
+    def from_detection_results(
+        cls,
+        *,
+        video_path: Path,
+        video_duration: float,
+        detection_results: list[DetectionResult],
+        frame_rate: float = 30.0,
+        default_duration: float = 1.0,
+    ) -> Timeline:
+        """Create timeline from detection results."""
+        blur_regions = []
+
+        for result in detection_results:
+            sensitive_areas = result.to_sensitive_areas()
+            for area in sensitive_areas:
+                region = BlurRegion.from_sensitive_area(
+                    area,
+                    duration=default_duration,
+                    blur_type="gaussian",  # Default blur type
+                )
+                blur_regions.append(region)
+
+        return cls(
+            video_path=video_path,
+            video_duration=video_duration,
+            frame_rate=frame_rate,
+            blur_regions=blur_regions,
+            metadata={
+                "generated_from": "detection_results",
+                "detection_count": sum(r.detection_count for r in detection_results),
+            },
+        )
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        coverage = self.blur_coverage_percentage()
+        return (
+            f"Timeline({self.region_count} regions, "
+            f"{self.total_blur_duration():.1f}s blur, "
+            f"{coverage:.1f}% coverage)"
+        )
+
+    def __repr__(self) -> str:
+        """Return detailed representation."""
+        return (
+            f"Timeline(id={self.id[:8]}..., video={self.video_path.name}, "
+            f"duration={self.video_duration}s, regions={self.region_count})"
+        )
