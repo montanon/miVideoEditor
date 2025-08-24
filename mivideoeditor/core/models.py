@@ -400,3 +400,181 @@ class SensitiveArea(BaseModel):
             f"bbox={self.bounding_box}, type={self.area_type}, "
             f"confidence={self.confidence})"
         )
+
+
+class DetectionResult(BaseModel):
+    """Container for detection algorithm results from a single frame."""
+
+    detections: list[tuple[BoundingBox, float, str]] = Field(
+        default_factory=list,
+        description="List of (region, confidence, area_type) tuples",
+    )
+    detection_time: float = Field(..., ge=0, description="Processing time in seconds")
+    detector_type: str = Field(..., description="Which detector produced this")
+    timestamp: float = Field(default=0.0, ge=0, description="Frame timestamp")
+    frame_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional frame information",
+    )
+
+    @field_validator("detections")
+    @classmethod
+    def validate_detections(
+        cls,
+        v: list[tuple[BoundingBox, float, str]],
+    ) -> list[tuple[BoundingBox, float, str]]:
+        """Validate detection tuples."""
+        for i, detection in enumerate(v):
+            expected_length = 3
+            if len(detection) != expected_length:
+                msg = (
+                    f"Detection at index {i} must be "
+                    f"(BoundingBox, confidence, area_type)"
+                )
+                raise ValueError(msg)
+            _, confidence, area_type = detection
+            if not 0.0 <= confidence <= 1.0:
+                msg = f"Confidence at index {i} out of range: {confidence}"
+                raise ValueError(msg)
+            if area_type not in SUPPORTED_AREA_TYPES:
+                msg = f"Invalid area_type at index {i}: {area_type}"
+                raise ValueError(msg)
+        return v
+
+    @property
+    def regions(self) -> list[BoundingBox]:
+        """Get all detected regions."""
+        return [region for region, _, _ in self.detections]
+
+    @property
+    def confidences(self) -> list[float]:
+        """Get all confidence scores."""
+        return [conf for _, conf, _ in self.detections]
+
+    @property
+    def area_types(self) -> list[str]:
+        """Get all area types."""
+        return [area_type for _, _, area_type in self.detections]
+
+    @property
+    def best_detection(self) -> tuple[BoundingBox, float, str] | None:
+        """Get the highest confidence detection."""
+        if not self.detections:
+            return None
+        return max(self.detections, key=lambda x: x[1])
+
+    @property
+    def detection_count(self) -> int:
+        """Get the number of detections."""
+        return len(self.detections)
+
+    @property
+    def has_detections(self) -> bool:
+        """Check if there are any detections."""
+        return len(self.detections) > 0
+
+    @property
+    def average_confidence(self) -> float:
+        """Calculate average confidence across all detections."""
+        if not self.detections:
+            return 0.0
+        confidences = self.confidences
+        return sum(confidences) / len(confidences)
+
+    def filter_by_confidence(self, threshold: float) -> DetectionResult:
+        """Filter detections by confidence threshold."""
+        filtered = [
+            detection
+            for detection in self.detections
+            if detection[1] >= threshold
+        ]
+
+        return DetectionResult(
+            detections=filtered,
+            detection_time=self.detection_time,
+            detector_type=self.detector_type,
+            timestamp=self.timestamp,
+            frame_metadata=self.frame_metadata,
+        )
+
+    def filter_by_area_type(self, area_type: str) -> DetectionResult:
+        """Filter detections by area type."""
+        filtered = [
+            detection
+            for detection in self.detections
+            if detection[2] == area_type
+        ]
+
+        return DetectionResult(
+            detections=filtered,
+            detection_time=self.detection_time,
+            detector_type=self.detector_type,
+            timestamp=self.timestamp,
+            frame_metadata=self.frame_metadata,
+        )
+
+    def merge_with(self, other: DetectionResult) -> DetectionResult:
+        """Merge with another detection result."""
+        return DetectionResult(
+            detections=self.detections + other.detections,
+            detection_time=self.detection_time + other.detection_time,
+            detector_type=f"{self.detector_type}+{other.detector_type}",
+            timestamp=self.timestamp,
+            frame_metadata={**self.frame_metadata, **other.frame_metadata},
+        )
+
+    def to_sensitive_areas(self) -> list[SensitiveArea]:
+        """Convert detections to SensitiveArea objects."""
+        areas = []
+        for region, confidence, area_type in self.detections:
+            area = SensitiveArea(
+                timestamp=self.timestamp,
+                bounding_box=region,
+                area_type=area_type,
+                confidence=confidence,
+                metadata={"detector": self.detector_type},
+            )
+            areas.append(area)
+        return areas
+
+    def add_detection(
+        self,
+        region: BoundingBox,
+        confidence: float,
+        area_type: str,
+    ) -> None:
+        """Add a new detection."""
+        self.detections.append((region, confidence, area_type))
+
+    @classmethod
+    def empty(
+        cls,
+        timestamp: float = 0.0,
+        detector_type: str = "unknown",
+    ) -> DetectionResult:
+        """Create an empty detection result."""
+        return cls(
+            detections=[],
+            detection_time=0.0,
+            detector_type=detector_type,
+            timestamp=timestamp,
+        )
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        type_counts = {}
+        for _, _, area_type in self.detections:
+            type_counts[area_type] = type_counts.get(area_type, 0) + 1
+        types_str = ", ".join(f"{k}:{v}" for k, v in type_counts.items())
+        return (
+            f"DetectionResult({self.detection_count} detections [{types_str}], "
+            f"avg_conf={self.average_confidence:.2f}, time={self.detection_time:.3f}s)"
+        )
+
+    def __repr__(self) -> str:
+        """Return detailed representation."""
+        return (
+            f"DetectionResult(detections={self.detection_count}, "
+            f"detector={self.detector_type}, timestamp={self.timestamp}, "
+            f"time={self.detection_time:.3f}s)"
+        )
