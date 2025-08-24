@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 HD_HEIGHT = 1080
 UHD_HEIGHT = 2160
+SECONDS_IN_HOUR = 3600
+SECONDS_IN_MINUTE = 60
 
 
 @dataclass
@@ -420,17 +422,17 @@ class VideoUtils:
             score += 1
 
         # Frame rate contribution (0-2 points)
-        if video_info.frame_rate > 60:
+        if video_info.frame_rate >= 60:
             score += 2
         elif video_info.frame_rate > 30:
             score += 1
 
         # Duration contribution (0-3 points)
-        if video_info.duration > 2 * 3600:  # > 2 hours
+        if video_info.duration >= 2 * SECONDS_IN_HOUR:  # >= 2 hours
             score += 3
-        elif video_info.duration > 3600:  # > 1 hour
+        elif video_info.duration > SECONDS_IN_HOUR:  # > 1 hour
             score += 2
-        elif video_info.duration > 1800:  # > 30 minutes
+        elif video_info.duration > SECONDS_IN_HOUR / 2:  # > 30 minutes
             score += 1
 
         # Bit rate contribution (0-2 points)
@@ -518,7 +520,7 @@ class VideoUtils:
         recommendations = []
 
         # Duration-based recommendations
-        if video_info.duration > 2 * 3600:  # > 2 hours
+        if video_info.duration > 2 * SECONDS_IN_HOUR:  # > 2 hours
             recommendations.append(
                 "Consider chunked processing for videos longer than 2 hours"
             )
@@ -635,7 +637,9 @@ class VideoUtils:
         if complexity > 7 or video_info.is_4k():
             settings["quality_mode"] = "fast"
             settings["reasoning"].append("High complexity/4K video - using fast mode")
-        elif complexity < 3 and video_info.duration < 300:  # < 5 minutes
+        elif (
+            complexity < 3 and video_info.duration < SECONDS_IN_MINUTE * 5
+        ):  # < 5 minutes
             settings["quality_mode"] = "high"
             settings["reasoning"].append(
                 "Low complexity short video - using high quality"
@@ -645,15 +649,15 @@ class VideoUtils:
         if video_info.frame_rate > 60:
             settings["frame_step"] = 15
             settings["reasoning"].append("High frame rate - increased frame step")
-        elif video_info.duration < 300:  # < 5 minutes
+        elif video_info.duration < SECONDS_IN_MINUTE * 5:  # < 5 minutes
             settings["frame_step"] = 5
             settings["reasoning"].append(
                 "Short video - decreased frame step for accuracy"
             )
 
         # Chunked processing for long videos
-        if video_info.duration > 3600:  # > 1 hour
-            settings["chunk_size"] = 300  # 5 minute chunks
+        if video_info.duration > SECONDS_IN_HOUR:  # > 1 hour
+            settings["chunk_size"] = SECONDS_IN_MINUTE * 5  # 5 minute chunks
             settings["reasoning"].append("Long video - enabling chunked processing")
 
             # Hardware acceleration based on system
