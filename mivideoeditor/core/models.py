@@ -24,11 +24,10 @@ class BoundingBox(BaseModel):
     width: int = Field(..., gt=0, description="Box width (must be > 0)")
     height: int = Field(..., gt=0, description="Box height (must be > 0)")
 
-    class Config:
-        """Pydantic configuration."""
-
-        frozen = True  # Make immutable
-        str_strip_whitespace = True
+    model_config = {
+        "frozen": True,  # Make immutable
+        "str_strip_whitespace": True,
+    }
 
     @property
     def area(self) -> int:
