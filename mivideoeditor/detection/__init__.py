@@ -33,6 +33,10 @@ from mivideoeditor.detection.training import (
     TrainingDataProcessor,
     TrainingResult,
 )
+from mivideoeditor.detection.cnn import (
+    CNNDetector,
+    YOLODetector,
+)
 
 __all__ = [
     # Base detection framework
@@ -63,4 +67,7 @@ __all__ = [
     "AnnotationStatistics",
     "TrainingDataProcessor",
     "TemplateTrainer",
+    # Deep learning detectors
+    "CNNDetector",
+    "YOLODetector",
 ]
