@@ -591,8 +591,7 @@ class EnsembleDetector(BaseDetector):
     ) -> DetectionResult:
         """Create empty detection result."""
         result = DetectionResult(
-            regions=[],
-            confidences=[],
+            detections=[],
             detection_time=detection_time,
             detector_type=f"ensemble_{self.ensemble_config.strategy}",
             timestamp=timestamp,

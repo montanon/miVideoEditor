@@ -75,8 +75,7 @@ class CNNDetector(BaseDetector):
             if self.model is None:
                 logger.warning("CNN model not initialized")
                 return DetectionResult(
-                    regions=[],
-                    confidences=[],
+                    detections=[],
                     detection_time=time.perf_counter() - start_time,
                     detector_type="cnn",
                     timestamp=timestamp,
@@ -97,9 +96,12 @@ class CNNDetector(BaseDetector):
 
             # Create result
             detection_time = time.perf_counter() - start_time
+            detections_list = [
+                (bbox, confidence, self.area_type)
+                for bbox, confidence in filtered_detections
+            ]
             result = DetectionResult(
-                regions=[d[0] for d in filtered_detections],
-                confidences=[d[1] for d in filtered_detections],
+                detections=detections_list,
                 detection_time=detection_time,
                 detector_type=f"cnn_{self.area_type}",
                 timestamp=timestamp,
@@ -116,8 +118,7 @@ class CNNDetector(BaseDetector):
         except Exception as e:
             logger.exception("CNN detection failed")
             return DetectionResult(
-                regions=[],
-                confidences=[],
+                detections=[],
                 detection_time=time.time() - start_time,
                 detector_type=f"cnn_{self.area_type}",
                 timestamp=timestamp,
@@ -333,8 +334,7 @@ class YOLODetector(BaseDetector):
 
             if self.model is None:
                 return DetectionResult(
-                    regions=[],
-                    confidences=[],
+                    detections=[],
                     detection_time=time.perf_counter() - start_time,
                     detector_type=f"yolo_{self.model_version}",
                     timestamp=timestamp,
@@ -360,9 +360,12 @@ class YOLODetector(BaseDetector):
 
             detection_time = time.perf_counter() - start_time
 
+            detections_list = [
+                (bbox, conf, "general")  # YOLO detects general objects
+                for bbox, conf in filtered
+            ]
             return DetectionResult(
-                regions=[bbox for bbox, _ in filtered],
-                confidences=[conf for _, conf in filtered],
+                detections=detections_list,
                 detection_time=detection_time,
                 detector_type=f"yolo_{self.model_version}",
                 timestamp=timestamp,
@@ -375,8 +378,7 @@ class YOLODetector(BaseDetector):
         except Exception as e:
             logger.exception("YOLO detection failed")
             return DetectionResult(
-                regions=[],
-                confidences=[],
+                detections=[],
                 detection_time=time.perf_counter() - start_time,
                 detector_type=f"yolo_{self.model_version}",
                 timestamp=timestamp,

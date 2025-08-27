@@ -9,13 +9,18 @@ from pydantic import BaseModel, Field, field_validator
 
 from mivideoeditor.core.models import BoundingBox
 from mivideoeditor.detection.base import DetectionConfig
-
-# Motion tracking constants
-MIN_DETECTIONS_FOR_VELOCITY = 2
-MIN_DETECTIONS_FOR_ACCELERATION = 3
-FRAMES_UNTIL_OCCLUDED = 3
-FRAMES_UNTIL_LOST = 10
-MAX_FRAMES_FOR_PREDICTION = 5
+from mivideoeditor.detection.constants import (
+    DEFAULT_MAX_FRAMES_WITHOUT_UPDATE,
+    DEFAULT_MAX_TRACKING_DISTANCE,
+    FRAMES_UNTIL_LOST,
+    FRAMES_UNTIL_OCCLUDED,
+    MAX_FRAMES_FOR_PREDICTION,
+    MAX_TRACK_HISTORY,
+    MIN_DETECTIONS_FOR_ACCELERATION,
+    MIN_DETECTIONS_FOR_VELOCITY,
+    REDUCED_CONFIDENCE_PREDICTION,
+    VELOCITY_SMOOTHING_FACTOR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +147,7 @@ class Track(BaseModel):
         new_confidences = [*self.confidence_history, confidence]
 
         # Limit history size to prevent memory growth
-        max_history = 50
+        max_history = MAX_TRACK_HISTORY
         if len(new_detections) > max_history:
             new_detections = new_detections[-max_history:]
             new_timestamps = new_timestamps[-max_history:]
@@ -188,7 +193,7 @@ class Track(BaseModel):
         new_vy = (curr_pos.y - prev_pos.y) / dt
 
         # Smooth velocity with exponential moving average
-        alpha = 0.3  # Smoothing factor
+        alpha = VELOCITY_SMOOTHING_FACTOR
         old_vx, old_vy = self.velocity
         smoothed_velocity = (
             alpha * new_vx + (1 - alpha) * old_vx,
@@ -266,8 +271,10 @@ class MotionTracker(BaseModel):
     config: DetectionConfig
     active_tracks: dict[int, Track] = Field(default_factory=dict)
     next_track_id: int = Field(default=0, ge=0)
-    max_tracking_distance: float = Field(default=100.0, gt=0.0)
-    max_frames_without_update: int = Field(default=15, ge=1)
+    max_tracking_distance: float = Field(default=DEFAULT_MAX_TRACKING_DISTANCE, gt=0.0)
+    max_frames_without_update: int = Field(
+        default=DEFAULT_MAX_FRAMES_WITHOUT_UPDATE, ge=1
+    )
     tracking_stats: TrackingStats = Field(default_factory=TrackingStats)
 
     class Config:
@@ -277,21 +284,21 @@ class MotionTracker(BaseModel):
 
     def update(
         self, detections: list[tuple[BoundingBox, float]], timestamp: float
-    ) -> list[TrackedDetection]:
+    ) -> tuple[MotionTracker, list[TrackedDetection]]:
         """Update tracking with new frame detections."""
         if timestamp < 0:
             msg = f"Timestamp must be non-negative, got {timestamp}"
             raise ValueError(msg)
 
         # Validate detections
-        for bbox, confidence in detections:
+        for _bbox, confidence in detections:
             if not 0.0 <= confidence <= 1.0:
                 msg = f"Confidence must be between 0.0 and 1.0, got {confidence}"
                 raise ValueError(msg)
 
         if not self.config.enable_motion_tracking:
             # Return detections without tracking
-            return [
+            untracked_detections = [
                 TrackedDetection(
                     bbox=bbox,
                     confidence=conf,
@@ -302,6 +309,7 @@ class MotionTracker(BaseModel):
                 )
                 for bbox, conf in detections
             ]
+            return self, untracked_detections
 
         # Step 1: Predict current positions of existing tracks
         predictions = self._predict_track_positions(timestamp)
@@ -410,13 +418,18 @@ class MotionTracker(BaseModel):
             }
         )
 
-        # Update self (create new instance)
-        object.__setattr__(self, "active_tracks", final_tracks)
-        object.__setattr__(self, "next_track_id", new_next_track_id)
-        object.__setattr__(self, "tracking_stats", final_stats)
+        # Create new instance with updated state
+        updated_tracker = self.copy(
+            update={
+                "active_tracks": final_tracks,
+                "next_track_id": new_next_track_id,
+                "tracking_stats": final_stats,
+            }
+        )
 
-        # Step 7: Return tracked detections
-        return self._get_tracked_detections(timestamp)
+        # Step 7: Return updated tracker and tracked detections
+        tracked_detections = updated_tracker._get_tracked_detections(timestamp)
+        return updated_tracker, tracked_detections
 
     def _predict_track_positions(self, timestamp: float) -> dict[int, BoundingBox]:
         """Predict current positions of all active tracks."""
@@ -518,7 +531,7 @@ class MotionTracker(BaseModel):
                     tracked_detection = TrackedDetection(
                         bbox=predicted_bbox,
                         confidence=track.track_confidence
-                        * 0.7,  # Reduced confidence for predictions
+                        * REDUCED_CONFIDENCE_PREDICTION,
                         track_id=track_id,
                         velocity=track.velocity,
                         frames_tracked=len(track.detections_history),

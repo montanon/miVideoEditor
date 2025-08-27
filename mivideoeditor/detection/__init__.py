@@ -1,5 +1,6 @@
 """Detection module - Algorithms for identifying sensitive areas in video frames."""
 
+from mivideoeditor.detection import constants
 from mivideoeditor.detection.base import (
     BaseDetector,
     DetectionConfig,
@@ -8,6 +9,10 @@ from mivideoeditor.detection.base import (
     TrainingError,
     create_detection_result_empty,
     validate_detection_config,
+)
+from mivideoeditor.detection.cnn import (
+    CNNDetector,
+    YOLODetector,
 )
 from mivideoeditor.detection.ensemble import (
     DetectionCluster,
@@ -32,10 +37,6 @@ from mivideoeditor.detection.training import (
     TrainingConfig,
     TrainingDataProcessor,
     TrainingResult,
-)
-from mivideoeditor.detection.cnn import (
-    CNNDetector,
-    YOLODetector,
 )
 
 __all__ = [
@@ -70,4 +71,5 @@ __all__ = [
     # Deep learning detectors
     "CNNDetector",
     "YOLODetector",
+    "constants",
 ]

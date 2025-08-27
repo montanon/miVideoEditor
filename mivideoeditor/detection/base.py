@@ -126,7 +126,7 @@ class BaseDetector(ABC):
     def _update_stats(self, detection_result: DetectionResult) -> None:
         """Update internal performance statistics."""
         self.detection_stats["total_frames_processed"] += 1
-        self.detection_stats["total_detections"] += len(detection_result.regions)
+        self.detection_stats["total_detections"] += len(detection_result.detections)
 
         # Update running average of detection time
         current_avg = self.detection_stats["average_detection_time"]
@@ -137,11 +137,9 @@ class BaseDetector(ABC):
         self.detection_stats["average_detection_time"] = new_avg
 
         # Update running average of confidence
-        if detection_result.confidences:
+        if detection_result.detections:
             current_conf_avg = self.detection_stats["average_confidence"]
-            frame_confidence = sum(detection_result.confidences) / len(
-                detection_result.confidences
-            )
+            frame_confidence = detection_result.average_confidence
             new_conf_avg = (
                 current_conf_avg * (frame_count - 1) + frame_confidence
             ) / frame_count
@@ -157,10 +155,7 @@ class BaseDetector(ABC):
             msg = f"Frame must be 2D or 3D array, got {frame.ndim}D"
             raise ValueError(msg)
 
-        if (
-            frame.ndim == STANDARD_RGB_CHANNELS
-            and frame.shape[2] not in VALID_FRAME_CHANNELS
-        ):
+        if frame.ndim == 3 and frame.shape[2] not in VALID_FRAME_CHANNELS:
             msg = (
                 f"Frame must have {VALID_FRAME_CHANNELS} channels, got {frame.shape[2]}"
             )
@@ -226,8 +221,7 @@ class DetectionTimeoutError(DetectionError):
 def create_detection_result_empty(timestamp: float = 0.0) -> DetectionResult:
     """Create an empty detection result."""
     return DetectionResult(
-        regions=[],
-        confidences=[],
+        detections=[],
         detection_time=0.0,
         detector_type="empty",
         timestamp=timestamp,
