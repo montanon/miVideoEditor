@@ -601,3 +601,57 @@ class ImageUtils:
             logger.exception(msg)
             raise RuntimeError(msg) from e
         return mask
+
+    @staticmethod
+    def template_match(
+        source_image: np.ndarray,
+        template_image: np.ndarray,
+        method: str = "TM_CCOEFF_NORMED",
+    ) -> float:
+        """Match templates returning the best match score."""
+        if source_image.size == 0 or template_image.size == 0:
+            return 0.0
+
+        try:
+            # Check if template is larger than source
+            if (
+                template_image.shape[0] > source_image.shape[0]
+                or template_image.shape[1] > source_image.shape[1]
+            ):
+                return 0.0
+
+            # Convert to grayscale for template matching
+            source_gray = source_image
+            template_gray = template_image
+
+            if len(source_image.shape) == 3:
+                source_gray = cv2.cvtColor(source_image, cv2.COLOR_BGR2GRAY)
+            if len(template_image.shape) == 3:
+                template_gray = cv2.cvtColor(template_image, cv2.COLOR_BGR2GRAY)
+
+            # Template matching methods
+            methods = {
+                "TM_CCOEFF": cv2.TM_CCOEFF,
+                "TM_CCOEFF_NORMED": cv2.TM_CCOEFF_NORMED,
+                "TM_CCORR": cv2.TM_CCORR,
+                "TM_CCORR_NORMED": cv2.TM_CCORR_NORMED,
+                "TM_SQDIFF": cv2.TM_SQDIFF,
+                "TM_SQDIFF_NORMED": cv2.TM_SQDIFF_NORMED,
+            }
+
+            cv_method = methods.get(method, cv2.TM_CCOEFF_NORMED)
+
+            # Perform template matching
+            result = cv2.matchTemplate(source_gray, template_gray, cv_method)
+
+            # Get the best match score
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+            # For SQDIFF methods, lower values are better
+            if method in ["TM_SQDIFF", "TM_SQDIFF_NORMED"]:
+                return float(1.0 - min_val) if min_val <= 1.0 else 0.0
+            return float(max_val) if max_val >= 0.0 else 0.0
+
+        except (ValueError, RuntimeError, cv2.error) as e:
+            logger.debug("Template matching failed: %s", e)
+            return 0.0
