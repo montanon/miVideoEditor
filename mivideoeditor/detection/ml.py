@@ -1,4 +1,4 @@
-"""Unified detector adapter that can run Torch or HF predictors behind one API."""
+"""MLDetector: a single detector interface consuming an injected MLPredictor."""
 
 from __future__ import annotations
 
@@ -8,30 +8,25 @@ import numpy as np
 
 from mivideoeditor.core.models import BoundingBox, DetectionResult
 from mivideoeditor.detection.base import BaseDetector, DetectionConfig
-from mivideoeditor.ml.backends.base import BasePredictor
-from mivideoeditor.ml.backends.factory import get_predictor
+from mivideoeditor.ml.api import MLPredictor
 
 logger = logging.getLogger(__name__)
 
 
-class Detector(BaseDetector):
-    """Single detector that delegates to a configured backend predictor.backends factory. Supports Torch and HF without exposing separate classes."""
+class MLDetector(BaseDetector):
+    """Single detector that delegates to an injected MLPredictor (DI)."""
 
     def __init__(
         self,
         config: DetectionConfig,
         *,
         label_map: dict[int, str],
-        backend: str = "torch",
-        predictor: BasePredictor | None = None,
-        **predictor_kwargs: object,
+        predictor: MLPredictor,
     ) -> None:
         super().__init__(config)
         self.label_map = label_map
-        self.detector_type = f"detector_{backend}"
-        self.predictor: BasePredictor = predictor or get_predictor(
-            backend, task="detection", **predictor_kwargs
-        )
+        self.detector_type = "ml_detector"
+        self.predictor: MLPredictor = predictor
         self.is_trained = True
 
     def detect(self, frame: np.ndarray, timestamp: float = 0.0) -> DetectionResult:
