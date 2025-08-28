@@ -1,3 +1,5 @@
+data/
+*.mp4
 .claude/
 .claude_logs/
 .vscode/
