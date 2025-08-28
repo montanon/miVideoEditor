@@ -1041,3 +1041,170 @@ class Timeline(BaseModel):
             f"Timeline(id={self.id[:8]}..., video={self.video_path.name}, "
             f"duration={self.video_duration}s, regions={self.region_count})"
         )
+
+
+class TimeRangeAnnotation(BaseModel):
+    """Represents a sensitive area that persists across a time range."""
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique identifier (UUID4)",
+    )
+    start_time: float = Field(..., ge=0, description="Start timestamp in seconds")
+    end_time: float = Field(..., ge=0, description="End timestamp in seconds")
+    bounding_box: BoundingBox = Field(..., description="Region coordinates")
+    area_type: str = Field(..., description="Type: chatgpt, atuin, terminal, custom")
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score [0.0, 1.0]",
+    )
+    sample_frame_paths: list[Path] = Field(
+        default_factory=list,
+        description="Paths to sample frame images from the range",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional metadata and context",
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Creation timestamp",
+    )
+
+    @field_validator("area_type")
+    @classmethod
+    def validate_area_type(cls, v: str) -> str:
+        """Validate area type against supported types."""
+        if v not in SUPPORTED_AREA_TYPES:
+            msg = f"area_type must be one of {list(SUPPORTED_AREA_TYPES.keys())}"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> Self:
+        """Validate that end_time is after start_time."""
+        if self.end_time <= self.start_time:
+            msg = f"end_time ({self.end_time}) must be greater than start_time ({self.start_time})"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def duration(self) -> float:
+        """Get the duration of the time range in seconds."""
+        return self.end_time - self.start_time
+
+    @property
+    def center_timestamp(self) -> float:
+        """Get the center timestamp of the range."""
+        return (self.start_time + self.end_time) / 2
+
+    def contains_timestamp(self, timestamp: float) -> bool:
+        """Check if a timestamp falls within this range."""
+        return self.start_time <= timestamp <= self.end_time
+
+    def overlaps_with(self, other: TimeRangeAnnotation) -> bool:
+        """Check if this range overlaps with another time range."""
+        return not (
+            self.end_time <= other.start_time or self.start_time >= other.end_time
+        )
+
+    def get_overlap_duration(self, other: TimeRangeAnnotation) -> float:
+        """Get the duration of overlap with another time range."""
+        if not self.overlaps_with(other):
+            return 0.0
+
+        overlap_start = max(self.start_time, other.start_time)
+        overlap_end = min(self.end_time, other.end_time)
+        return overlap_end - overlap_start
+
+    def split_at_timestamp(
+        self, timestamp: float
+    ) -> tuple[TimeRangeAnnotation, TimeRangeAnnotation]:
+        """Split this annotation at a specific timestamp."""
+        if not self.contains_timestamp(timestamp):
+            msg = f"Timestamp {timestamp} is not within range [{self.start_time}, {self.end_time}]"
+            raise ValueError(msg)
+
+        # Create first part
+        first_part = TimeRangeAnnotation(
+            start_time=self.start_time,
+            end_time=timestamp,
+            bounding_box=self.bounding_box,
+            area_type=self.area_type,
+            confidence=self.confidence,
+            metadata={**self.metadata, "split_from": self.id},
+        )
+
+        # Create second part
+        second_part = TimeRangeAnnotation(
+            start_time=timestamp,
+            end_time=self.end_time,
+            bounding_box=self.bounding_box,
+            area_type=self.area_type,
+            confidence=self.confidence,
+            metadata={**self.metadata, "split_from": self.id},
+        )
+
+        return first_part, second_part
+
+    def to_sensitive_areas(self, sample_interval: float = 1.0) -> list[SensitiveArea]:
+        """Convert to individual SensitiveArea annotations at regular intervals."""
+        areas = []
+        current_time = self.start_time
+
+        while current_time <= self.end_time:
+            # Use actual timestamp, but don't exceed end_time
+            timestamp = min(current_time, self.end_time)
+
+            area = SensitiveArea(
+                timestamp=timestamp,
+                bounding_box=self.bounding_box,
+                area_type=self.area_type,
+                confidence=self.confidence,
+                metadata={
+                    **self.metadata,
+                    "source_range_id": self.id,
+                    "range_start": self.start_time,
+                    "range_end": self.end_time,
+                },
+            )
+            areas.append(area)
+
+            current_time += sample_interval
+
+            # Ensure we include the end timestamp
+            if current_time > self.end_time and timestamp < self.end_time:
+                end_area = SensitiveArea(
+                    timestamp=self.end_time,
+                    bounding_box=self.bounding_box,
+                    area_type=self.area_type,
+                    confidence=self.confidence,
+                    metadata={
+                        **self.metadata,
+                        "source_range_id": self.id,
+                        "range_start": self.start_time,
+                        "range_end": self.end_time,
+                    },
+                )
+                areas.append(end_area)
+                break
+
+        return areas
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return (
+            f"TimeRange({self.area_type}, "
+            f"{self.start_time:.1f}s-{self.end_time:.1f}s, "
+            f"duration={self.duration:.1f}s)"
+        )
+
+    def __repr__(self) -> str:
+        """Return detailed representation."""
+        return (
+            f"TimeRangeAnnotation(id={self.id[:8]}..., "
+            f"range=[{self.start_time}, {self.end_time}], "
+            f"type={self.area_type}, bbox={self.bounding_box})"
+        )
