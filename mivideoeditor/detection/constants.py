@@ -69,3 +69,8 @@ GENERIC_MAX_ASPECT_RATIO = 10.0
 
 # Morphological operation kernel size
 MORPHOLOGY_KERNEL_SIZE = (5, 5)
+
+# Template detector scale and confidence constants
+TEMPLATE_SCALE_TOLERANCE = 0.01  # Tolerance for scale comparison
+HIGH_CONFIDENCE_THRESHOLD = 0.9  # High confidence threshold for analysis
+LOW_CONFIDENCE_THRESHOLD = 0.6  # Low confidence threshold for analysis

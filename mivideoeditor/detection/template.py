@@ -13,6 +13,31 @@ import numpy as np
 from mivideoeditor.core.constants import SUPPORTED_AREA_TYPES
 from mivideoeditor.core.models import BoundingBox, DetectionResult, SensitiveArea
 from mivideoeditor.detection.base import BaseDetector, DetectionConfig, DetectionError
+from mivideoeditor.detection.constants import (
+    ATUIN_HIGHLIGHT_HSV_LOWER,
+    ATUIN_HIGHLIGHT_HSV_UPPER,
+    ATUIN_MAX_ASPECT_RATIO,
+    ATUIN_MIN_ASPECT_RATIO,
+    ATUIN_TERMINAL_HSV_LOWER,
+    ATUIN_TERMINAL_HSV_UPPER,
+    CHATGPT_DARK_HSV_LOWER,
+    CHATGPT_DARK_HSV_UPPER,
+    CHATGPT_LIGHT_HSV_LOWER,
+    CHATGPT_LIGHT_HSV_UPPER,
+    CHATGPT_MAX_ASPECT_RATIO,
+    CHATGPT_MIN_ASPECT_RATIO,
+    DEFAULT_IOU_THRESHOLD,
+    GENERIC_MAX_ASPECT_RATIO,
+    GENERIC_MIN_ASPECT_RATIO,
+    HIGH_CONFIDENCE_THRESHOLD,
+    LOW_CONFIDENCE_THRESHOLD,
+    MAX_CANDIDATE_REGIONS,
+    MORPHOLOGY_KERNEL_SIZE,
+    TEMPLATE_MIN_SIZE,
+    TEMPLATE_PADDING_PIXELS,
+    TEMPLATE_SCALE_TOLERANCE,
+)
+from mivideoeditor.storage.annotation_service import AnnotationService
 from mivideoeditor.utils.image import ImageUtils
 
 logger = logging.getLogger(__name__)
@@ -85,8 +110,8 @@ class TemplateDetector(BaseDetector):
             self.color_profiles.append(
                 ColorProfile(
                     area_type="chatgpt",
-                    hsv_lower=(0, 0, 0),
-                    hsv_upper=(180, 30, 50),
+                    hsv_lower=CHATGPT_DARK_HSV_LOWER,
+                    hsv_upper=CHATGPT_DARK_HSV_UPPER,
                     name="chatgpt_dark",
                 )
             )
@@ -94,8 +119,8 @@ class TemplateDetector(BaseDetector):
             self.color_profiles.append(
                 ColorProfile(
                     area_type="chatgpt",
-                    hsv_lower=(0, 0, 200),
-                    hsv_upper=(180, 30, 255),
+                    hsv_lower=CHATGPT_LIGHT_HSV_LOWER,
+                    hsv_upper=CHATGPT_LIGHT_HSV_UPPER,
                     name="chatgpt_light",
                 )
             )
@@ -106,8 +131,8 @@ class TemplateDetector(BaseDetector):
             self.color_profiles.append(
                 ColorProfile(
                     area_type="atuin",
-                    hsv_lower=(0, 0, 0),
-                    hsv_upper=(180, 255, 30),
+                    hsv_lower=ATUIN_TERMINAL_HSV_LOWER,
+                    hsv_upper=ATUIN_TERMINAL_HSV_UPPER,
                     name="atuin_terminal",
                 )
             )
@@ -115,8 +140,8 @@ class TemplateDetector(BaseDetector):
             self.color_profiles.append(
                 ColorProfile(
                     area_type="atuin",
-                    hsv_lower=(0, 0, 150),
-                    hsv_upper=(180, 100, 255),
+                    hsv_lower=ATUIN_HIGHLIGHT_HSV_LOWER,
+                    hsv_upper=ATUIN_HIGHLIGHT_HSV_UPPER,
                     name="atuin_highlight",
                 )
             )
@@ -131,8 +156,7 @@ class TemplateDetector(BaseDetector):
             if not self.is_trained and not self.templates:
                 logger.warning("Detector not trained and no templates loaded")
                 return DetectionResult(
-                    regions=[],
-                    confidences=[],
+                    detections=[],
                     detection_time=time.time() - start_time,
                     detector_type=f"template_{self.area_type}",
                     timestamp=timestamp,
@@ -146,8 +170,7 @@ class TemplateDetector(BaseDetector):
                 logger.debug("No candidate regions found in color filtering")
                 detection_time = time.time() - start_time
                 result = DetectionResult(
-                    regions=[],
-                    confidences=[],
+                    detections=[],
                     detection_time=detection_time,
                     detector_type=f"template_{self.area_type}",
                     timestamp=timestamp,
@@ -158,7 +181,7 @@ class TemplateDetector(BaseDetector):
 
             # Stage 2: Template matching within candidate regions
             detections = []
-            for region in candidate_regions[:10]:  # Limit to top 10 candidates
+            for region in candidate_regions[:MAX_CANDIDATE_REGIONS]:
                 region_detections = self._match_templates_in_region(frame, region)
                 detections.extend(region_detections)
 
@@ -167,9 +190,11 @@ class TemplateDetector(BaseDetector):
 
             # Create result
             detection_time = time.time() - start_time
+            detections_list = [
+                (d.bbox, d.confidence, self.area_type) for d in filtered_detections
+            ]
             result = DetectionResult(
-                regions=[d.bbox for d in filtered_detections],
-                confidences=[d.confidence for d in filtered_detections],
+                detections=detections_list,
                 detection_time=detection_time,
                 detector_type=f"template_{self.area_type}",
                 timestamp=timestamp,
@@ -184,8 +209,7 @@ class TemplateDetector(BaseDetector):
         except Exception as e:
             logger.exception("Detection failed for frame at timestamp %s", timestamp)
             error_result = DetectionResult(
-                regions=[],
-                confidences=[],
+                detections=[],
                 detection_time=time.time() - start_time,
                 detector_type=f"template_{self.area_type}",
                 timestamp=timestamp,
@@ -212,7 +236,7 @@ class TemplateDetector(BaseDetector):
             combined_mask = cv2.bitwise_or(combined_mask, mask)
 
         # Morphological operations to clean up mask
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, MORPHOLOGY_KERNEL_SIZE)
         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
 
@@ -238,7 +262,7 @@ class TemplateDetector(BaseDetector):
                 continue
 
             # Add some padding around the region
-            padding = 10
+            padding = TEMPLATE_PADDING_PIXELS
             x = max(0, x - padding)
             y = max(0, y - padding)
             w = min(frame.shape[1] - x, w + 2 * padding)
@@ -256,13 +280,13 @@ class TemplateDetector(BaseDetector):
         """Validate if aspect ratio matches expected interface proportions."""
         if self.area_type == "chatgpt":
             # ChatGPT interface is typically wider than tall
-            return 0.5 <= aspect_ratio <= 5.0
+            return CHATGPT_MIN_ASPECT_RATIO <= aspect_ratio <= CHATGPT_MAX_ASPECT_RATIO
         if self.area_type == "atuin":
             # Atuin can be various ratios depending on terminal size
-            return 0.3 <= aspect_ratio <= 10.0
+            return ATUIN_MIN_ASPECT_RATIO <= aspect_ratio <= ATUIN_MAX_ASPECT_RATIO
 
         # Generic validation
-        return 0.1 <= aspect_ratio <= 10.0
+        return GENERIC_MIN_ASPECT_RATIO <= aspect_ratio <= GENERIC_MAX_ASPECT_RATIO
 
     def _match_templates_in_region(
         self, frame: np.ndarray, region: BoundingBox
@@ -319,7 +343,7 @@ class TemplateDetector(BaseDetector):
                             )
                         )
 
-                except Exception as e:
+                except (ValueError, RuntimeError, cv2.error) as e:
                     logger.debug(
                         "Template matching failed for %s: %s", template_name, e
                     )
@@ -329,13 +353,13 @@ class TemplateDetector(BaseDetector):
 
     def _scale_template(self, template: np.ndarray, scale: float) -> np.ndarray:
         """Scale template by given factor."""
-        if abs(scale - 1.0) < 0.01:  # No scaling needed
+        if abs(scale - 1.0) < TEMPLATE_SCALE_TOLERANCE:  # No scaling needed
             return template
 
         new_width = int(template.shape[1] * scale)
         new_height = int(template.shape[0] * scale)
 
-        if new_width < 5 or new_height < 5:  # Too small
+        if new_width < TEMPLATE_MIN_SIZE or new_height < TEMPLATE_MIN_SIZE:
             return template
 
         return cv2.resize(
@@ -358,7 +382,7 @@ class TemplateDetector(BaseDetector):
 
             for existing in filtered_detections:
                 iou = detection.bbox.iou(existing.bbox)
-                if iou > 0.3:  # Overlapping detections
+                if iou > DEFAULT_IOU_THRESHOLD:
                     is_duplicate = True
                     break
 
@@ -403,31 +427,191 @@ class TemplateDetector(BaseDetector):
             logger.exception(msg)
             raise DetectionError(msg) from e
 
+    def train_from_storage(
+        self, annotation_service: AnnotationService, video_id: str | None = None
+    ) -> None:
+        """Train detector using annotations from storage service."""
+        try:
+            if video_id:
+                # Get annotations for specific video
+                annotations = annotation_service.get_annotations_for_video(video_id)
+                logger.info(
+                    "Loading %d annotations for video %s", len(annotations), video_id
+                )
+            else:
+                # Get all annotations of this area type
+                # Note: This would require extending AnnotationService
+                logger.warning(
+                    "Training from all annotations not yet implemented - "
+                    "use video_id parameter"
+                )
+                annotations = []
+
+            if not annotations:
+                video_msg = f"video {video_id}" if video_id else "this detector"
+                msg = f"No annotations found for training {video_msg}"
+                raise ValueError(msg)
+
+            # Convert AnnotationRecord objects back to SensitiveArea objects
+            sensitive_areas = []
+            for ann_record in annotations:
+                # Create SensitiveArea from AnnotationRecord
+                metadata = ann_record.metadata or {}
+                metadata.update(
+                    {
+                        "video_id": ann_record.video_id,
+                        "frame_number": ann_record.frame_number,
+                        "annotated_by": ann_record.annotated_by,
+                    }
+                )
+
+                sensitive_area = SensitiveArea(
+                    timestamp=ann_record.timestamp,
+                    bounding_box=ann_record.bounding_box,
+                    area_type=ann_record.area_type,
+                    confidence=ann_record.confidence,
+                    metadata=metadata,
+                    id=ann_record.id,
+                    image_path=ann_record.image_path,
+                )
+                sensitive_areas.append(sensitive_area)
+
+            # Use the regular train method
+            self.train(sensitive_areas)
+            logger.info("Training from storage completed successfully")
+
+        except DetectionError:
+            raise
+        except Exception as e:
+            msg = f"Training from storage failed: {e}"
+            logger.exception(msg)
+            raise DetectionError(msg) from e
+
     def _extract_templates_from_annotations(
         self, annotations: list[SensitiveArea]
     ) -> None:
-        """Extract templates from annotated regions."""
-        # This is a simplified implementation
-        # In a full implementation, you would:
-        # 1. Extract image regions from frames
-        # 2. Cluster similar templates
-        # 3. Select representative templates
-
+        """Extract REAL templates from annotated regions using stored frame images."""
         logger.info("Extracting templates from %d annotations", len(annotations))
 
-        # For now, create placeholder templates
-        # TODO: Implement actual template extraction when frame data is available
-        placeholder_template = np.ones((50, 100, 3), dtype=np.uint8) * 128
-        self.templates[f"{self.area_type}_default"] = placeholder_template
+        template_count = 0
 
-        logger.info("Created %d templates", len(self.templates))
+        for annotation in annotations:
+            # Skip annotations without real frame data
+            if not annotation.image_path or not annotation.image_path.exists():
+                logger.warning(
+                    "Skipping annotation %s - no frame image at %s",
+                    annotation.id,
+                    annotation.image_path,
+                )
+                continue
+
+            # Load the real frame image
+            frame_image = cv2.imread(str(annotation.image_path))
+            if frame_image is None:
+                logger.warning("Failed to load frame image: %s", annotation.image_path)
+                continue
+
+            # Extract the annotated region from the frame
+            bbox = annotation.bounding_box
+            height, width = frame_image.shape[:2]
+
+            # Ensure bounding box is within frame bounds
+            x1 = max(0, bbox.x)
+            y1 = max(0, bbox.y)
+            x2 = min(width, bbox.x + bbox.width)
+            y2 = min(height, bbox.y + bbox.height)
+
+            # Extract the region of interest
+            if x2 > x1 and y2 > y1:
+                roi = frame_image[y1:y2, x1:x2].copy()
+
+                # Resize template to reasonable size for matching
+                roi = self._normalize_template_size(roi)
+
+                # Store the real template
+                template_key = f"{self.area_type}_{annotation.id}"
+                self.templates[template_key] = roi
+                template_count += 1
+
+                logger.debug(
+                    "Extracted template %s: %dx%d from %s",
+                    template_key,
+                    roi.shape[1],
+                    roi.shape[0],
+                    annotation.image_path,
+                )
+
+        if template_count == 0:
+            msg = (
+                f"No valid templates extracted for {self.area_type}. "
+                "Ensure annotations have valid image_path with stored frame images."
+            )
+            raise DetectionError(msg)
+
+        logger.info(
+            "Extracted %d REAL templates from %d annotations",
+            template_count,
+            len(annotations),
+        )
+
+    def _normalize_template_size(self, template: np.ndarray) -> np.ndarray:
+        """Normalize template size for consistent matching."""
+        height, width = template.shape[:2]
+
+        # Set reasonable bounds for template size
+        max_width = 200
+        max_height = 150
+        min_width = 20
+        min_height = 15
+
+        # Calculate scaling factor to fit within bounds
+        if width > max_width or height > max_height:
+            scale_w = max_width / width
+            scale_h = max_height / height
+            scale = min(scale_w, scale_h)
+
+            new_width = max(min_width, int(width * scale))
+            new_height = max(min_height, int(height * scale))
+
+            template = cv2.resize(
+                template, (new_width, new_height), interpolation=cv2.INTER_AREA
+            )
+            logger.debug(
+                "Resized template from %dx%d to %dx%d",
+                width,
+                height,
+                new_width,
+                new_height,
+            )
+
+        return template
 
     def _learn_color_profiles_from_annotations(
-        self, _annotations: list[SensitiveArea]
+        self, annotations: list[SensitiveArea]
     ) -> None:
-        """Learn color profiles from annotated regions."""
-        # This would analyze the color distribution in annotated regions
-        # For now, keep the default profiles
+        """Learn and refine color profiles from annotated regions."""
+        # Analyze annotation patterns to potentially refine color profiles
+        logger.info(
+            "Analyzing %d annotations for color profile refinement", len(annotations)
+        )
+
+        # Count annotations by confidence to understand detection quality
+        high_conf_count = sum(
+            1 for ann in annotations if ann.confidence > HIGH_CONFIDENCE_THRESHOLD
+        )
+        low_conf_count = sum(
+            1 for ann in annotations if ann.confidence < LOW_CONFIDENCE_THRESHOLD
+        )
+
+        logger.info(
+            "Annotation confidence distribution: %d high (>0.9), %d low (<0.6)",
+            high_conf_count,
+            low_conf_count,
+        )
+
+        # For now, keep the default profiles but log the analysis
+        # In a future implementation, this could analyze actual frame colors
+        # to refine the HSV ranges based on successful detections
         logger.info("Using default color profiles for %s", self.area_type)
 
     def save_model(self, path: Path) -> None:
