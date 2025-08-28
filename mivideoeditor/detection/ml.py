@@ -1,42 +1,38 @@
-"""Adapter to use trained ML models within the Detection pipeline."""
+"""Unified detector adapter that can run Torch or HF predictors behind one API."""
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import numpy as np
 
 from mivideoeditor.core.models import BoundingBox, DetectionResult
 from mivideoeditor.detection.base import BaseDetector, DetectionConfig
-from mivideoeditor.ml.config import ModelConfig, PredictConfig
-from mivideoeditor.ml.engine.predictor import Predictor
+from mivideoeditor.ml.backends.base import BasePredictor
+from mivideoeditor.ml.backends.factory import get_predictor
 
 logger = logging.getLogger(__name__)
 
 
-class MLDetector(BaseDetector):
-    """Detection adapter that wraps a trained ML model.
-
-    This class is independent of training/evaluation and only manages
-    model loading and frame-level inference to produce DetectionResult.
-    """
+class Detector(BaseDetector):
+    """Single detector that delegates to a configured backend predictor.backends factory. Supports Torch and HF without exposing separate classes."""
 
     def __init__(
         self,
         config: DetectionConfig,
         *,
-        model_cfg: ModelConfig,
-        checkpoint_path: Path,
         label_map: dict[int, str],
-        predict_cfg: PredictConfig | None = None,
+        backend: str = "torch",
+        predictor: BasePredictor | None = None,
+        **predictor_kwargs: object,
     ) -> None:
         super().__init__(config)
         self.label_map = label_map
-        self.predictor = Predictor(model_cfg, predict_cfg or PredictConfig())
-        self.predictor.load_checkpoint(Path(checkpoint_path))
+        self.detector_type = f"detector_{backend}"
+        self.predictor: BasePredictor = predictor or get_predictor(
+            backend, task="detection", **predictor_kwargs
+        )
         self.is_trained = True
-        self.detector_type = f"ml_{model_cfg.name}"
 
     def detect(self, frame: np.ndarray, timestamp: float = 0.0) -> DetectionResult:
         """Detect sensitive regions in a single frame."""

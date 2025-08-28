@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -33,7 +34,10 @@ class _TorchPredictorAdapter(BasePredictor):
 
 
 def _make_torch_predictor(**kwargs: Any) -> BasePredictor:
+    checkpoint_path = kwargs.pop("checkpoint_path", None)
     impl = Predictor(**kwargs)
+    if checkpoint_path:
+        impl.load_checkpoint(Path(checkpoint_path))
     return _TorchPredictorAdapter(impl=impl)
 
 
