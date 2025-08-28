@@ -15,6 +15,13 @@ class VideoAnnotationApp {
         this.startY = 0;
         this.currentRect = null;
         this.videoMetadata = {};
+        this.videoBlob = null;
+        
+        // Time range annotation state
+        this.isTimeRangeMode = false;
+        this.timeRangeStart = null;
+        this.timeRangeEnd = null;
+        this.timeRangeAnnotations = [];
         
         this.init();
     }
@@ -52,6 +59,21 @@ class VideoAnnotationApp {
         this.saveAnnotationBtn = document.getElementById('saveAnnotationBtn');
         this.clearCanvasBtn = document.getElementById('clearCanvasBtn');
         
+        // Time range elements
+        this.toggleTimeRangeBtn = document.getElementById('toggleTimeRangeBtn');
+        this.timeRangeControls = document.getElementById('timeRangeControls');
+        this.sampleInterval = document.getElementById('sampleInterval');
+        this.rangeStart = document.getElementById('rangeStart');
+        this.rangeEnd = document.getElementById('rangeEnd');
+        this.rangeDuration = document.getElementById('rangeDuration');
+        
+        // Replace video elements
+        this.replaceVideoBtn = document.getElementById('replaceVideoBtn');
+        this.replaceVideoSection = document.getElementById('replaceVideoSection');
+        this.replaceVideoInput = document.getElementById('replaceVideoInput');
+        this.cancelReplaceBtn = document.getElementById('cancelReplaceBtn');
+        this.drawingInstructions = document.getElementById('drawingInstructions');
+        
         this.annotationsList = document.getElementById('annotationsList');
         this.annotationsStats = document.getElementById('annotationsStats');
         this.exportJsonBtn = document.getElementById('exportJsonBtn');
@@ -81,6 +103,14 @@ class VideoAnnotationApp {
         this.frameForwardBtn.addEventListener('click', () => this.seekFrames(1));
         this.saveAnnotationBtn.addEventListener('click', () => this.saveCurrentAnnotation());
         this.clearCanvasBtn.addEventListener('click', () => this.clearCanvas());
+        
+        // Time range controls
+        this.toggleTimeRangeBtn.addEventListener('click', () => this.toggleTimeRangeMode());
+        
+        // Replace video controls
+        this.replaceVideoBtn.addEventListener('click', () => this.showReplaceVideoSection());
+        this.replaceVideoInput.addEventListener('change', (e) => this.handleVideoReplace(e));
+        this.cancelReplaceBtn.addEventListener('click', () => this.hideReplaceVideoSection());
 
         // Timeline
         this.timeline.addEventListener('click', (e) => this.onTimelineClick(e));
@@ -94,6 +124,9 @@ class VideoAnnotationApp {
 
         // Window resize
         window.addEventListener('resize', () => this.resizeCanvas());
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => this.cleanup());
     }
 
     async handleVideoUpload(event) {
@@ -133,6 +166,86 @@ class VideoAnnotationApp {
         }
     }
 
+    // Video Replacement Methods
+    showReplaceVideoSection() {
+        if (!this.currentVideoId) {
+            this.showError('Please upload a video first');
+            return;
+        }
+        this.replaceVideoSection.style.display = 'block';
+        this.replaceVideoBtn.textContent = '⏳ Replace Mode';
+        this.replaceVideoBtn.style.background = '#ef4444';
+    }
+    
+    hideReplaceVideoSection() {
+        this.replaceVideoSection.style.display = 'none';
+        this.replaceVideoBtn.textContent = '🔄 Replace Video';
+        this.replaceVideoBtn.style.background = '#f59e0b';
+        this.replaceVideoInput.value = '';
+    }
+    
+    async handleVideoReplace(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        if (!this.currentVideoId) {
+            this.showError('No video to replace');
+            return;
+        }
+
+        const confirmed = confirm(`Are you sure you want to replace the current video? This will:\n\n✓ Keep all existing annotations\n✓ Replace the video file\n✓ Update video metadata\n\nThis cannot be undone.`);
+        if (!confirmed) {
+            this.replaceVideoInput.value = '';
+            return;
+        }
+
+        this.showLoading('Replacing video...');
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const response = await fetch(`/api/videos/${this.currentVideoId}/replace`, {
+                method: 'PUT',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Video replacement failed');
+            }
+
+            const result = await response.json();
+            
+            // Update video metadata but keep the same ID
+            this.videoMetadata = result;
+
+            // Clean up old video blob and set new source
+            if (this.video.src && this.video.src.startsWith('blob:')) {
+                URL.revokeObjectURL(this.video.src);
+            }
+            this.video.src = URL.createObjectURL(file);
+            
+            // Hide replace section
+            this.hideReplaceVideoSection();
+            
+            // Clear current drawing state but keep annotations
+            this.clearCanvas();
+            
+            // Reload annotations to ensure they're still valid
+            await this.loadAnnotations();
+            await this.loadTimeRangeAnnotations();
+            
+            this.showSuccess(`Video replaced successfully: ${result.filename}`);
+
+        } catch (error) {
+            this.showError(`Video replacement failed: ${error.message}`);
+            this.replaceVideoInput.value = '';
+        } finally {
+            this.hideLoading();
+        }
+    }
+
     onVideoLoaded() {
         this.resizeCanvas();
         this.setupTimeline();
@@ -158,25 +271,41 @@ class VideoAnnotationApp {
         if (!this.video || !this.canvas) return;
 
         const rect = this.video.getBoundingClientRect();
-        this.canvas.width = this.video.videoWidth || rect.width;
-        this.canvas.height = this.video.videoHeight || rect.height;
+        const pixelRatio = window.devicePixelRatio || 1;
+        
+        // Set actual size in memory (scaled to device pixel ratio)
+        this.canvas.width = (this.video.videoWidth || rect.width) * pixelRatio;
+        this.canvas.height = (this.video.videoHeight || rect.height) * pixelRatio;
+        
+        // Set display size (CSS pixels)
         this.canvas.style.width = `${rect.width}px`;
         this.canvas.style.height = `${rect.height}px`;
+        
+        // Scale the context to ensure correct drawing operations
+        this.ctx.scale(pixelRatio, pixelRatio);
 
         this.canvas.classList.add('drawing');
     }
 
     // Canvas Drawing Methods
+    getCanvasCoordinates(event) {
+        const rect = this.canvas.getBoundingClientRect();
+        
+        // Get mouse position relative to canvas display size
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+        
+        // Since the context is already scaled by pixelRatio in resizeCanvas(),
+        // we just need the coordinates relative to the display size
+        return { x: mouseX, y: mouseY };
+    }
+    
     onCanvasMouseDown(event) {
         if (this.video.paused) {
-            const rect = this.canvas.getBoundingClientRect();
-            const scaleX = this.canvas.width / rect.width;
-            const scaleY = this.canvas.height / rect.height;
-
-            this.startX = (event.clientX - rect.left) * scaleX;
-            this.startY = (event.clientY - rect.top) * scaleY;
+            const coords = this.getCanvasCoordinates(event);
+            this.startX = coords.x;
+            this.startY = coords.y;
             this.isDrawing = true;
-
             this.clearCanvas();
         }
     }
@@ -184,36 +313,42 @@ class VideoAnnotationApp {
     onCanvasMouseMove(event) {
         if (!this.isDrawing) return;
 
-        const rect = this.canvas.getBoundingClientRect();
-        const scaleX = this.canvas.width / rect.width;
-        const scaleY = this.canvas.height / rect.height;
-
-        const currentX = (event.clientX - rect.left) * scaleX;
-        const currentY = (event.clientY - rect.top) * scaleY;
-
-        this.drawBoundingBox(this.startX, this.startY, currentX, currentY);
+        const coords = this.getCanvasCoordinates(event);
+        this.drawBoundingBox(this.startX, this.startY, coords.x, coords.y);
     }
 
     onCanvasMouseUp(event) {
         if (!this.isDrawing) return;
 
-        const rect = this.canvas.getBoundingClientRect();
-        const scaleX = this.canvas.width / rect.width;
-        const scaleY = this.canvas.height / rect.height;
-
-        const endX = (event.clientX - rect.left) * scaleX;
-        const endY = (event.clientY - rect.top) * scaleY;
+        const coords = this.getCanvasCoordinates(event);
+        const endX = coords.x;
+        const endY = coords.y;
 
         this.isDrawing = false;
 
-        // Calculate bounding box
+        // Calculate bounding box coordinates
         const x = Math.min(this.startX, endX);
         const y = Math.min(this.startY, endY);
         const width = Math.abs(endX - this.startX);
         const height = Math.abs(endY - this.startY);
+        
+        // Convert from canvas display coordinates to video pixel coordinates
+        const rect = this.canvas.getBoundingClientRect();
+        const scaleX = this.video.videoWidth / rect.width;
+        const scaleY = this.video.videoHeight / rect.height;
+        
+        const videoX = Math.round(x * scaleX);
+        const videoY = Math.round(y * scaleY);
+        const videoWidth = Math.round(width * scaleX);
+        const videoHeight = Math.round(height * scaleY);
 
-        if (width > 10 && height > 10) {
-            this.currentRect = { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+        if (videoWidth > 10 && videoHeight > 10) {
+            this.currentRect = { 
+                x: videoX, 
+                y: videoY, 
+                width: videoWidth, 
+                height: videoHeight 
+            };
             this.saveAnnotationBtn.disabled = false;
             this.showInfo('Bounding box created. Click "Save Annotation" to save.');
         } else {
@@ -248,6 +383,16 @@ class VideoAnnotationApp {
     // Annotation Management
     async saveCurrentAnnotation() {
         if (!this.currentRect || !this.currentVideoId) return;
+
+        // Handle time range mode
+        if (this.isTimeRangeMode) {
+            if (this.timeRangeStart === null || this.timeRangeEnd === null) {
+                this.showError('Please select both start and end times for the time range');
+                return;
+            }
+            await this.saveTimeRangeAnnotation();
+            return;
+        }
 
         this.showLoading('Saving annotation...');
 
@@ -468,7 +613,13 @@ class VideoAnnotationApp {
     onTimelineClick(event) {
         const rect = this.timeline.getBoundingClientRect();
         const position = (event.clientX - rect.left) / rect.width;
-        this.video.currentTime = position * this.video.duration;
+        const clickTime = position * this.video.duration;
+        
+        if (this.isTimeRangeMode) {
+            this.setTimeRangePoint(clickTime);
+        } else {
+            this.video.currentTime = clickTime;
+        }
     }
 
     setupTimeline() {
@@ -539,6 +690,275 @@ class VideoAnnotationApp {
     showError(message) { this.showMessage(message, 'error'); }
     showWarning(message) { this.showMessage(message, 'warning'); }
     showInfo(message) { this.showMessage(message, 'info'); }
+    
+    // Memory management
+    cleanupVideo() {
+        if (this.video && this.video.src && this.video.src.startsWith('blob:')) {
+            URL.revokeObjectURL(this.video.src);
+            this.video.src = '';
+        }
+        if (this.videoBlob) {
+            this.videoBlob = null;
+        }
+    }
+    
+    // Cleanup on page unload
+    cleanup() {
+        this.cleanupVideo();
+        if (this.canvas && this.ctx) {
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        }
+        this.annotations = [];
+        this.currentVideoId = null;
+    }
+    
+    // Time Range Annotation Methods
+    toggleTimeRangeMode() {
+        this.isTimeRangeMode = !this.isTimeRangeMode;
+        
+        if (this.isTimeRangeMode) {
+            this.toggleTimeRangeBtn.textContent = '🎯 Single Point Mode';
+            this.toggleTimeRangeBtn.style.background = '#ef4444';
+            this.timeRangeControls.style.display = 'block';
+            this.drawingInstructions.textContent = 'Time Range Mode: Click timeline to set start/end times, then draw bounding box';
+            this.saveAnnotationBtn.textContent = '💾 Save Time Range';
+        } else {
+            this.toggleTimeRangeBtn.textContent = '⏱️ Time Range Mode';
+            this.toggleTimeRangeBtn.style.background = '';
+            this.timeRangeControls.style.display = 'none';
+            this.drawingInstructions.textContent = 'Click and drag on the video to draw bounding boxes';
+            this.saveAnnotationBtn.textContent = '💾 Save Annotation';
+            this.resetTimeRange();
+        }
+        
+        this.clearCanvas();
+    }
+    
+    resetTimeRange() {
+        this.timeRangeStart = null;
+        this.timeRangeEnd = null;
+        this.rangeStart.textContent = '--';
+        this.rangeEnd.textContent = '--';
+        this.rangeDuration.textContent = '--';
+    }
+    
+    setTimeRangePoint(timestamp) {
+        if (!this.isTimeRangeMode) return;
+        
+        if (this.timeRangeStart === null) {
+            // Set start time
+            this.timeRangeStart = timestamp;
+            this.rangeStart.textContent = timestamp.toFixed(1);
+            this.showInfo(`Range start set to ${timestamp.toFixed(1)}s. Click timeline again to set end time.`);
+        } else if (this.timeRangeEnd === null) {
+            // Set end time
+            if (timestamp <= this.timeRangeStart) {
+                this.showWarning('End time must be after start time. Please select a later timestamp.');
+                return;
+            }
+            
+            this.timeRangeEnd = timestamp;
+            this.rangeEnd.textContent = timestamp.toFixed(1);
+            
+            const duration = this.timeRangeEnd - this.timeRangeStart;
+            this.rangeDuration.textContent = duration.toFixed(1);
+            
+            this.showSuccess(`Time range set: ${this.timeRangeStart.toFixed(1)}s - ${this.timeRangeEnd.toFixed(1)}s (${duration.toFixed(1)}s). Now draw a bounding box.`);
+            
+            // Update timeline visualization
+            this.updateTimelineRangeDisplay();
+        } else {
+            // Reset and start over
+            this.resetTimeRange();
+            this.setTimeRangePoint(timestamp);
+        }
+    }
+    
+    updateTimelineRangeDisplay() {
+        if (!this.timeRangeStart || !this.timeRangeEnd) return;
+        
+        const duration = this.video.duration;
+        const startPercent = (this.timeRangeStart / duration) * 100;
+        const endPercent = (this.timeRangeEnd / duration) * 100;
+        
+        // Remove existing range display
+        const existingRange = this.timeline.querySelector('.time-range-highlight');
+        if (existingRange) {
+            existingRange.remove();
+        }
+        
+        // Add range highlight
+        const rangeElement = document.createElement('div');
+        rangeElement.className = 'time-range-highlight';
+        rangeElement.style.position = 'absolute';
+        rangeElement.style.left = `${startPercent}%`;
+        rangeElement.style.width = `${endPercent - startPercent}%`;
+        rangeElement.style.height = '100%';
+        rangeElement.style.backgroundColor = 'rgba(59, 130, 246, 0.3)';
+        rangeElement.style.border = '2px solid #3b82f6';
+        rangeElement.style.pointerEvents = 'none';
+        rangeElement.style.zIndex = '10';
+        
+        this.timeline.appendChild(rangeElement);
+    }
+    
+    async saveTimeRangeAnnotation() {
+        if (!this.currentRect || !this.currentVideoId) {
+            this.showError('Please draw a bounding box first.');
+            return;
+        }
+        
+        // Validate time range
+        const validation = this.validateTimeRange(this.timeRangeStart, this.timeRangeEnd);
+        if (!validation.valid) {
+            this.showError(validation.error);
+            return;
+        }
+        
+        // Check for overlaps (warn but don't prevent)
+        if (this.checkTimeRangeOverlap(this.timeRangeStart, this.timeRangeEnd)) {
+            if (!confirm('This time range overlaps with existing annotations. Continue anyway?')) {
+                return;
+            }
+        }
+        
+        this.showLoading('Saving time range annotation...');
+        
+        try {
+            const sampleInterval = parseFloat(this.sampleInterval.value);
+            
+            const annotationData = {
+                video_id: this.currentVideoId,
+                start_time: this.timeRangeStart,
+                end_time: this.timeRangeEnd,
+                bounding_box: this.currentRect,
+                area_type: this.areaTypeSelect.value,
+                confidence: 1.0,
+                sample_interval: sampleInterval
+            };
+            
+            const response = await fetch('/api/time-range-annotations', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(annotationData)
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to save time range annotation');
+            }
+            
+            const result = await response.json();
+            
+            this.clearCanvas();
+            this.resetTimeRange();
+            await this.loadAnnotations(); // Refresh regular annotations
+            await this.loadTimeRangeAnnotations(); // Load time range annotations
+            
+            this.showSuccess(`Time range annotation saved! Created ${result.sample_frame_count} sample points over ${result.duration.toFixed(1)}s.`);
+            
+        } catch (error) {
+            this.showError(`Failed to save time range annotation: ${error.message}`);
+        } finally {
+            this.hideLoading();
+        }
+    }
+    
+    async loadTimeRangeAnnotations() {
+        if (!this.currentVideoId) return;
+        
+        try {
+            const response = await fetch(`/api/time-range-annotations/video/${this.currentVideoId}`);
+            if (!response.ok) {
+                throw new Error('Failed to load time range annotations');
+            }
+            
+            this.timeRangeAnnotations = await response.json();
+            this.updateTimeRangeDisplay();
+            
+        } catch (error) {
+            console.error('Failed to load time range annotations:', error);
+        }
+    }
+    
+    updateTimeRangeDisplay() {
+        // Add time range spans to timeline
+        const existingRanges = this.timeline.querySelectorAll('.time-range-span');
+        existingRanges.forEach(span => span.remove());
+        
+        this.timeRangeAnnotations.forEach((range, index) => {
+            const duration = this.video.duration;
+            const startPercent = (range.start_time / duration) * 100;
+            const endPercent = (range.end_time / duration) * 100;
+            
+            const spanElement = document.createElement('div');
+            spanElement.className = 'time-range-span';
+            spanElement.style.position = 'absolute';
+            spanElement.style.left = `${startPercent}%`;
+            spanElement.style.width = `${endPercent - startPercent}%`;
+            spanElement.style.height = '4px';
+            spanElement.style.bottom = '20px';
+            spanElement.style.backgroundColor = this.getColorForAreaType(range.area_type);
+            spanElement.style.pointerEvents = 'none';
+            spanElement.style.zIndex = '5';
+            spanElement.title = `${range.area_type}: ${range.start_time.toFixed(1)}s - ${range.end_time.toFixed(1)}s`;
+            
+            this.timeline.appendChild(spanElement);
+        });
+    }
+    
+    // Time range validation and utility methods
+    validateTimeRange(startTime, endTime) {
+        if (startTime === null || endTime === null) {
+            return { valid: false, error: 'Please set both start and end times' };
+        }
+        
+        if (startTime >= endTime) {
+            return { valid: false, error: 'Start time must be before end time' };
+        }
+        
+        if (startTime < 0 || endTime > this.video.duration) {
+            return { valid: false, error: 'Times must be within video duration' };
+        }
+        
+        const minDuration = 0.1; // Minimum 0.1 seconds
+        if (endTime - startTime < minDuration) {
+            return { valid: false, error: `Time range must be at least ${minDuration} seconds` };
+        }
+        
+        const maxDuration = 300; // Maximum 5 minutes
+        if (endTime - startTime > maxDuration) {
+            return { valid: false, error: `Time range cannot exceed ${maxDuration} seconds` };
+        }
+        
+        return { valid: true };
+    }
+    
+    checkTimeRangeOverlap(startTime, endTime) {
+        return this.timeRangeAnnotations.some(existing => {
+            return !(endTime <= existing.start_time || startTime >= existing.end_time);
+        });
+    }
+    
+    formatTimeRange(startTime, endTime) {
+        const start = this.formatTime(startTime);
+        const end = this.formatTime(endTime);
+        const duration = (endTime - startTime).toFixed(1);
+        return `${start} - ${end} (${duration}s)`;
+    }
+    
+    getColorForAreaType(areaType) {
+        const colors = {
+            'chatgpt': '#10b981',
+            'atuin': '#f59e0b',
+            'terminal': '#8b5cf6',
+            'sensitive_text': '#ef4444',
+            'custom': '#6b7280'
+        };
+        return colors[areaType] || colors['custom'];
+    }
 }
 
 // Initialize the application

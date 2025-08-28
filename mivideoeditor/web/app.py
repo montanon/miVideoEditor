@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import logging
-import mimetypes
 from pathlib import Path
-from typing import Dict, List
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,13 +22,18 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS middleware for browser access
+# CORS middleware for browser access - restrictive for security
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Include routers
@@ -42,7 +45,7 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
-@app.get("/")
+@app.get("/", response_model=None)
 async def root():
     """Serve the main annotation interface."""
     static_file = static_dir / "annotation-app.html"
@@ -56,7 +59,7 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> dict[str, str]:
     """Health check endpoint."""
     return {
         "status": "healthy",
@@ -66,13 +69,13 @@ async def health_check():
 
 
 def create_app() -> FastAPI:
-    """Factory function to create the FastAPI app."""
+    """Create and return the FastAPI app."""
     return app
 
 
-def run_dev_server(host: str = "127.0.0.1", port: int = 8000):
+def run_dev_server(host: str = "127.0.0.1", port: int = 8000) -> None:
     """Run development server."""
-    logger.info(f"Starting annotation app server at http://{host}:{port}")
+    logger.info("Starting annotation app server at http://%s:%d", host, port)
     uvicorn.run(
         "mivideoeditor.web.app:app",
         host=host,

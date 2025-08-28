@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -14,13 +16,18 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from mivideoeditor.core.models import BoundingBox, SensitiveArea
+from mivideoeditor.core.models import BoundingBox, SensitiveArea, TimeRangeAnnotation, VideoRecord
 from mivideoeditor.storage.annotation_service import AnnotationService
 from mivideoeditor.storage.file_manager import FileManager, FileManagerConfig
 from mivideoeditor.storage.service import StorageService, StorageConfig
 from mivideoeditor.utils.video import VideoUtils
 
 logger = logging.getLogger(__name__)
+
+# Security constants
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024  # 10GB for long videos
+MAX_FILENAME_LENGTH = 100
+CHUNK_SIZE = 8 * 1024 * 1024  # 8MB chunks for large file handling
 
 # Initialize services
 storage_config = StorageConfig()
@@ -74,6 +81,31 @@ class VideoFrameRequest(BaseModel):
     timestamp: float = Field(..., ge=0.0, description="Timestamp in seconds")
 
 
+class TimeRangeAnnotationRequest(BaseModel):
+    """Request model for creating time range annotations."""
+    video_id: str = Field(..., description="Video identifier")
+    start_time: float = Field(..., ge=0.0, description="Start timestamp in seconds")
+    end_time: float = Field(..., ge=0.0, description="End timestamp in seconds")
+    bounding_box: Dict[str, int] = Field(..., description="Bounding box coordinates")
+    area_type: str = Field(..., description="Type of sensitive area")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence score")
+    sample_interval: float = Field(default=1.0, ge=0.1, le=10.0, description="Frame sampling interval in seconds")
+
+
+class TimeRangeAnnotationResponse(BaseModel):
+    """Response model for time range annotation data."""
+    id: str
+    video_id: str
+    start_time: float
+    end_time: float
+    duration: float
+    bounding_box: Dict[str, int]
+    area_type: str
+    confidence: float
+    sample_frame_count: int
+    created_at: str
+
+
 # Video Management Endpoints
 
 @router.post("/videos/upload", response_model=VideoUploadResponse)
@@ -95,17 +127,66 @@ async def upload_video(file: UploadFile = File(...)):
                 detail=f"Invalid file type. Supported formats: {', '.join(valid_extensions)}"
             )
         
-        # Create unique video ID
-        video_id = f"vid_{int(time.time())}_{file.filename}"
+        # Validate file size
+        if file.size and file.size > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413, 
+                detail=f"File too large. Maximum size: {MAX_UPLOAD_SIZE // (1024*1024*1024)}GB"
+            )
         
-        # Save uploaded file with original extension
-        video_content = await file.read()
+        # Sanitize filename
+        if not file.filename or len(file.filename) > MAX_FILENAME_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid filename length"
+            )
+        
+        # Remove dangerous characters and path components
+        safe_filename = Path(file.filename).name  # Remove any path components
+        safe_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', safe_filename)
+        
+        if not safe_filename or safe_filename in ['.', '..']:
+            safe_filename = f"video_{int(time.time())}{file_ext}"
+        
+        # Create unique video ID with sanitized filename
+        video_id = f"vid_{int(time.time())}_{safe_filename}"
+        
+        # Prepare file path
         original_ext = file_ext or '.mp4'
         video_path = file_manager.directories["videos"] / f"{video_id}{original_ext}"
         
-        # Write video file
-        with open(video_path, "wb") as f:
-            f.write(video_content)
+        # Ensure the directory exists and is safe
+        video_dir = video_path.parent
+        video_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Additional path safety check
+        if not str(video_path).startswith(str(video_dir)):
+            raise HTTPException(status_code=400, detail="Invalid file path")
+        
+        # Stream write large video file in chunks
+        bytes_written = 0
+        try:
+            with open(video_path, "wb") as f:
+                while chunk := await file.read(CHUNK_SIZE):
+                    bytes_written += len(chunk)
+                    if bytes_written > MAX_UPLOAD_SIZE:
+                        # Clean up partial file
+                        f.close()
+                        video_path.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=413,
+                            detail="File too large during upload"
+                        )
+                    f.write(chunk)
+                    
+            if bytes_written == 0:
+                video_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail="Empty file uploaded")
+                
+        except OSError as e:
+            video_path.unlink(missing_ok=True)
+            logger.error(f"Failed to write video file: {e}")
+            raise HTTPException(status_code=500, detail="Failed to save video file")
         
         # Extract video metadata
         try:
@@ -121,13 +202,13 @@ async def upload_video(file: UploadFile = File(...)):
         from mivideoeditor.storage.models import VideoRecord
         video_record = VideoRecord(
             id=video_id,
-            filename=file.filename,
+            filename=safe_filename,
             filepath=video_path,
             duration=video_info.duration,
             frame_rate=video_info.frame_rate,
             width=video_info.width,
             height=video_info.height,
-            file_size=len(video_content),
+            file_size=bytes_written,
             codec=video_info.codec,
             metadata={"original_filename": file.filename}
         )
@@ -138,12 +219,12 @@ async def upload_video(file: UploadFile = File(...)):
         
         return VideoUploadResponse(
             video_id=video_id,
-            filename=file.filename,
+            filename=safe_filename,
             duration=video_info.duration,
             width=video_info.width,
             height=video_info.height,
             frame_rate=video_info.frame_rate,
-            file_size=len(video_content)
+            file_size=bytes_written
         )
         
     except HTTPException:
@@ -186,8 +267,8 @@ async def get_video_frame(video_id: str, timestamp: float):
         if not video_record:
             raise HTTPException(status_code=404, detail="Video not found")
         
-        # Validate timestamp
-        if timestamp < 0 or timestamp > video_record.duration:
+        # Validate timestamp with tolerance for floating point precision
+        if timestamp < 0 or timestamp > (video_record.duration + 0.1):
             raise HTTPException(
                 status_code=400, 
                 detail=f"Timestamp {timestamp} outside video duration (0-{video_record.duration})"
@@ -198,19 +279,24 @@ async def get_video_frame(video_id: str, timestamp: float):
         if not video_path.exists():
             raise HTTPException(status_code=404, detail="Video file not found on disk")
         
-        # Use cv2 to extract frame
-        cap = cv2.VideoCapture(str(video_path))
+        # Use cv2 to extract frame with proper resource management
+        cap = None
         try:
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                raise HTTPException(status_code=500, detail="Failed to open video file")
+            
             # Seek to timestamp
             cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
             ret, frame = cap.read()
             
-            if not ret:
+            if not ret or frame is None:
                 raise HTTPException(status_code=400, detail="Failed to extract frame at specified timestamp")
             
-            # Encode frame as JPEG
-            success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if not success:
+            # Encode frame as JPEG with error handling
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 85]
+            success, buffer = cv2.imencode('.jpg', frame, encode_params)
+            if not success or buffer is None:
                 raise HTTPException(status_code=500, detail="Failed to encode frame")
             
             # Return as streaming response
@@ -220,8 +306,14 @@ async def get_video_frame(video_id: str, timestamp: float):
                 headers={"Content-Disposition": f"inline; filename=frame_{video_id}_{timestamp:.2f}.jpg"}
             )
             
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Unexpected error during frame extraction: {e}")
+            raise HTTPException(status_code=500, detail="Frame extraction failed")
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
             
     except HTTPException:
         raise
@@ -243,29 +335,57 @@ async def create_annotation(request: AnnotationRequest):
         
         # Validate bounding box
         try:
-            bbox = BoundingBox(
-                x=request.bounding_box["x"],
-                y=request.bounding_box["y"],
-                width=request.bounding_box["width"],
-                height=request.bounding_box["height"]
-            )
-        except (KeyError, ValidationError) as e:
+            # Extract and validate bounding box values
+            x = request.bounding_box.get("x", 0)
+            y = request.bounding_box.get("y", 0)
+            width = request.bounding_box.get("width", 0)
+            height = request.bounding_box.get("height", 0)
+            
+            # Validate bounding box constraints
+            if not all(isinstance(val, (int, float)) and val >= 0 for val in [x, y, width, height]):
+                raise ValueError("Bounding box coordinates must be non-negative numbers")
+            
+            if width < 5 or height < 5:
+                raise ValueError("Bounding box too small (minimum 5x5 pixels)")
+                
+            if width > video_record.width or height > video_record.height:
+                raise ValueError("Bounding box exceeds video dimensions")
+                
+            if x + width > video_record.width or y + height > video_record.height:
+                raise ValueError("Bounding box extends beyond video boundaries")
+            
+            bbox = BoundingBox(x=int(x), y=int(y), width=int(width), height=int(height))
+            
+        except (KeyError, ValueError, ValidationError) as e:
             raise HTTPException(status_code=400, detail=f"Invalid bounding box: {e}")
         
-        # Extract frame at timestamp
+        # Extract frame at timestamp with proper resource management
         video_path = video_record.filepath
-        cap = cv2.VideoCapture(str(video_path))
+        cap = None
+        frame = None
+        frame_number = 0
+        
         try:
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                raise HTTPException(status_code=500, detail="Failed to open video for frame extraction")
+                
             cap.set(cv2.CAP_PROP_POS_MSEC, request.timestamp * 1000)
             ret, frame = cap.read()
             
-            if not ret:
+            if not ret or frame is None:
                 raise HTTPException(status_code=400, detail="Failed to extract frame for annotation")
             
             frame_number = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Frame extraction failed during annotation: {e}")
+            raise HTTPException(status_code=500, detail="Frame extraction failed")
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
         
         # Create SensitiveArea object
         sensitive_area = SensitiveArea(
@@ -435,3 +555,347 @@ async def export_annotations(video_id: str, format: str = "json"):
     except Exception as e:
         logger.exception(f"Export failed: {e}")
         raise HTTPException(status_code=500, detail="Export failed")
+
+
+# Time Range Annotation Endpoints
+
+@router.post("/time-range-annotations", response_model=TimeRangeAnnotationResponse)
+async def create_time_range_annotation(request: TimeRangeAnnotationRequest):
+    """Create a new time range annotation with batch frame extraction."""
+    try:
+        # Get video record
+        video_record = storage_service.get_video(request.video_id)
+        if not video_record:
+            raise HTTPException(status_code=404, detail="Video not found")
+        
+        # Validate time range
+        if request.end_time <= request.start_time:
+            raise HTTPException(
+                status_code=400, 
+                detail="end_time must be greater than start_time"
+            )
+        
+        # Validate time range is within video duration
+        if request.start_time < 0 or request.end_time > (video_record.duration + 0.1):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Time range [{request.start_time}, {request.end_time}] outside video duration (0-{video_record.duration})"
+            )
+        
+        # Validate bounding box (reuse existing validation logic)
+        try:
+            x = request.bounding_box.get("x", 0)
+            y = request.bounding_box.get("y", 0)
+            width = request.bounding_box.get("width", 0)
+            height = request.bounding_box.get("height", 0)
+            
+            if not all(isinstance(val, (int, float)) and val >= 0 for val in [x, y, width, height]):
+                raise ValueError("Bounding box coordinates must be non-negative numbers")
+            
+            if width < 5 or height < 5:
+                raise ValueError("Bounding box too small (minimum 5x5 pixels)")
+                
+            if width > video_record.width or height > video_record.height:
+                raise ValueError("Bounding box exceeds video dimensions")
+                
+            if x + width > video_record.width or y + height > video_record.height:
+                raise ValueError("Bounding box extends beyond video boundaries")
+            
+            bbox = BoundingBox(x=int(x), y=int(y), width=int(width), height=int(height))
+            
+        except (KeyError, ValueError, ValidationError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid bounding box: {e}")
+        
+        # Create TimeRangeAnnotation
+        time_range = TimeRangeAnnotation(
+            start_time=request.start_time,
+            end_time=request.end_time,
+            bounding_box=bbox,
+            area_type=request.area_type,
+            confidence=request.confidence,
+            metadata={
+                "video_id": request.video_id,
+                "sample_interval": request.sample_interval,
+                "created_by": "manual_annotation",
+                "creation_method": "time_range_browser_app"
+            }
+        )
+        
+        # Convert to individual SensitiveArea annotations for storage
+        sensitive_areas = time_range.to_sensitive_areas(request.sample_interval)
+        
+        # Save all individual annotations
+        saved_annotations = []
+        for i, area in enumerate(sensitive_areas):
+            # Extract frame for this timestamp
+            cap = None
+            try:
+                cap = cv2.VideoCapture(str(video_record.filepath))
+                if cap.isOpened():
+                    cap.set(cv2.CAP_PROP_POS_MSEC, area.timestamp * 1000)
+                    ret, frame = cap.read()
+                    
+                    if ret and frame is not None:
+                        # Save annotation with frame
+                        annotation_id = annotation_service.save_annotation(area, frame)
+                        saved_annotations.append(annotation_id)
+                    else:
+                        # Save annotation without frame
+                        annotation_id = annotation_service.save_annotation(area)
+                        saved_annotations.append(annotation_id)
+            except Exception as e:
+                logger.warning(f"Failed to extract frame for timestamp {area.timestamp}: {e}")
+                # Save annotation without frame
+                annotation_id = annotation_service.save_annotation(area)
+                saved_annotations.append(annotation_id)
+            finally:
+                if cap is not None:
+                    cap.release()
+        
+        logger.info(
+            f"Time range annotation created: {time_range.id} "
+            f"({request.start_time:.1f}s-{request.end_time:.1f}s) "
+            f"with {len(saved_annotations)} sample points"
+        )
+        
+        return TimeRangeAnnotationResponse(
+            id=time_range.id,
+            video_id=request.video_id,
+            start_time=time_range.start_time,
+            end_time=time_range.end_time,
+            duration=time_range.duration,
+            bounding_box={
+                "x": time_range.bounding_box.x,
+                "y": time_range.bounding_box.y,
+                "width": time_range.bounding_box.width,
+                "height": time_range.bounding_box.height,
+            },
+            area_type=time_range.area_type,
+            confidence=time_range.confidence,
+            sample_frame_count=len(sensitive_areas),
+            created_at=time_range.created_at.isoformat()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Time range annotation creation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Time range annotation creation failed: {str(e)}")
+
+
+@router.get("/time-range-annotations/video/{video_id}")
+async def get_video_time_ranges(video_id: str):
+    """Get all time range annotations for a video by analyzing individual annotations."""
+    try:
+        # Verify video exists
+        video_record = storage_service.get_video(video_id)
+        if not video_record:
+            raise HTTPException(status_code=404, detail="Video not found")
+        
+        # Get all annotations for the video
+        annotations = annotation_service.get_annotations_for_video(video_id)
+        
+        # Group annotations by source_range_id if they exist
+        time_ranges = {}
+        
+        for annotation in annotations:
+            source_range_id = annotation.metadata.get("source_range_id")
+            if source_range_id:
+                if source_range_id not in time_ranges:
+                    time_ranges[source_range_id] = {
+                        "id": source_range_id,
+                        "video_id": video_id,
+                        "start_time": annotation.metadata.get("range_start", annotation.timestamp),
+                        "end_time": annotation.metadata.get("range_end", annotation.timestamp),
+                        "bounding_box": {
+                            "x": annotation.bounding_box.x,
+                            "y": annotation.bounding_box.y,
+                            "width": annotation.bounding_box.width,
+                            "height": annotation.bounding_box.height,
+                        },
+                        "area_type": annotation.area_type,
+                        "confidence": annotation.confidence,
+                        "sample_frame_count": 0,
+                        "created_at": annotation.metadata.get("created_at", ""),
+                    }
+                
+                time_ranges[source_range_id]["sample_frame_count"] += 1
+        
+        # Convert to list and add duration
+        result = []
+        for time_range in time_ranges.values():
+            time_range["duration"] = time_range["end_time"] - time_range["start_time"]
+            result.append(time_range)
+        
+        # Sort by start time
+        result.sort(key=lambda x: x["start_time"])
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to get time range annotations: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve time range annotations")
+
+
+@router.put("/videos/{video_id}/replace", response_model=VideoUploadResponse)
+async def replace_video(video_id: str, file: UploadFile = File(...)):
+    """Replace an existing video with a new one, preserving the video ID."""
+    try:
+        # Get existing video record
+        existing_video = storage_service.get_video_by_id(video_id)
+        if not existing_video:
+            raise HTTPException(status_code=404, detail="Video not found")
+        
+        # Validate file type - same as upload
+        valid_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v']
+        file_ext = Path(file.filename).suffix.lower() if file.filename else ""
+        
+        is_valid_type = (
+            (file.content_type and file.content_type.startswith('video/')) or
+            file_ext in valid_extensions
+        )
+        
+        if not is_valid_type:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid file type. Supported formats: {', '.join(valid_extensions)}"
+            )
+        
+        # Validate file size
+        if file.size and file.size > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413, 
+                detail=f"File too large. Maximum size: {MAX_UPLOAD_SIZE // (1024*1024*1024)}GB"
+            )
+        
+        # Create new filename with sanitization (same as upload)
+        if not file.filename or len(file.filename) > MAX_FILENAME_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid filename length"
+            )
+        
+        # Remove dangerous characters and path components
+        safe_filename = Path(file.filename).name  # Remove any path components
+        safe_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', safe_filename)
+        
+        if not safe_filename or safe_filename in ['.', '..']:
+            safe_filename = f"video_{int(time.time())}{file_ext}"
+        
+        # Use existing video ID with new filename
+        original_ext = file_ext or '.mp4'
+        file_path = file_manager.directories["videos"] / f"{video_id}{original_ext}"
+        
+        # Clean up old video file if it exists
+        old_video_path = Path(existing_video.filepath)
+        if old_video_path.exists():
+            try:
+                old_video_path.unlink()
+                logger.info(f"Removed old video file: {old_video_path}")
+            except Exception as e:
+                logger.warning(f"Failed to remove old video file {old_video_path}: {e}")
+        
+        # Save new video file with streaming
+        total_size = 0
+        with open(file_path, "wb") as buffer:
+            while chunk := await file.read(CHUNK_SIZE):
+                total_size += len(chunk)
+                if total_size > MAX_UPLOAD_SIZE:
+                    # Clean up partial file
+                    buffer.close()
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413, 
+                        detail=f"File too large. Maximum size: {MAX_UPLOAD_SIZE // (1024*1024*1024)}GB"
+                    )
+                buffer.write(chunk)
+        
+        # Extract video metadata using VideoUtils
+        try:
+            metadata = VideoUtils.get_video_info(str(file_path))
+        except Exception as e:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Invalid video file: {e}")
+        
+        # Update video record with new information
+        video_record = VideoRecord(
+            id=video_id,  # Keep same ID
+            filename=safe_filename,
+            filepath=str(file_path),
+            filesize=total_size,
+            duration=metadata.duration,
+            width=metadata.width, 
+            height=metadata.height,
+            fps=metadata.fps,
+            upload_timestamp=datetime.utcnow(),
+            format=metadata.format if hasattr(metadata, 'format') else 'unknown'
+        )
+        
+        # Save updated video record
+        storage_service.save_video(video_record)
+        
+        logger.info(f"Video replaced successfully: {video_id} -> {file_path}")
+        
+        return VideoUploadResponse(
+            video_id=video_id,
+            filename=safe_filename,
+            duration=metadata.duration,
+            width=metadata.width,
+            height=metadata.height,
+            fps=metadata.fps,
+            message="Video replaced successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Video replacement failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Video replacement failed: {str(e)}")
+
+
+@router.delete("/videos/{video_id}")
+async def delete_video(video_id: str):
+    """Delete a video and all its associated annotations."""
+    try:
+        # Get video record
+        video_record = storage_service.get_video_by_id(video_id)
+        if not video_record:
+            raise HTTPException(status_code=404, detail="Video not found")
+        
+        # Delete all annotations for this video
+        annotations = storage_service.get_annotations_by_video(video_id)
+        for annotation in annotations:
+            storage_service.delete_annotation(annotation.id)
+        
+        # Delete all time range annotations for this video (if they exist)
+        try:
+            time_range_annotations = storage_service.get_time_range_annotations_by_video(video_id)
+            for tr_annotation in time_range_annotations:
+                storage_service.delete_time_range_annotation(tr_annotation.id)
+        except AttributeError:
+            # Time range annotations might not be implemented in storage yet
+            pass
+        
+        # Delete video file
+        video_path = Path(video_record.filepath)
+        if video_path.exists():
+            try:
+                video_path.unlink()
+                logger.info(f"Deleted video file: {video_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete video file {video_path}: {e}")
+        
+        # Delete video record from storage
+        storage_service.delete_video(video_id)
+        
+        logger.info(f"Video deleted successfully: {video_id}")
+        
+        return {"message": "Video and all associated data deleted successfully", "video_id": video_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Video deletion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Video deletion failed: {str(e)}")

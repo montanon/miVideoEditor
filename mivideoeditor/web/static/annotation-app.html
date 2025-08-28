@@ -73,12 +73,38 @@
                 </div>
                 
                 <div class="control-group">
+                    <button id="toggleTimeRangeBtn">⏱️ Time Range Mode</button>
                     <button id="saveAnnotationBtn" disabled>💾 Save Annotation</button>
                     <button id="clearCanvasBtn">🗑️ Clear Canvas</button>
+                    <button id="replaceVideoBtn" style="background: #f59e0b; margin-left: 10px;">🔄 Replace Video</button>
+                </div>
+                
+                <!-- Replace Video Section -->
+                <div class="control-group" id="replaceVideoSection" style="display: none;">
+                    <input type="file" id="replaceVideoInput" accept="video/*,.mkv" style="display: none;">
+                    <button class="upload-btn" onclick="document.getElementById('replaceVideoInput').click()">
+                        📹 Select New Video
+                    </button>
+                    <button id="cancelReplaceBtn" style="background: #6b7280; margin-left: 10px;">❌ Cancel</button>
+                    <p style="font-size: 0.9em; color: #666; margin: 5px 0;">⚠️ This will replace the current video but keep all annotations</p>
+                </div>
+
+                <div class="control-group" id="timeRangeControls" style="display: none;">
+                    <label>Sample Interval:</label>
+                    <select id="sampleInterval">
+                        <option value="0.5">0.5s</option>
+                        <option value="1.0" selected>1.0s</option>
+                        <option value="2.0">2.0s</option>
+                        <option value="5.0">5.0s</option>
+                    </select>
+                    <div class="time-range-display" id="timeRangeDisplay">
+                        <span>Range: <span id="rangeStart">--</span>s - <span id="rangeEnd">--</span>s</span>
+                        <span>Duration: <span id="rangeDuration">--</span>s</span>
+                    </div>
                 </div>
 
                 <div class="control-group">
-                    <span class="drawing-instructions">
+                    <span class="drawing-instructions" id="drawingInstructions">
                         Click and drag on the video to draw bounding boxes
                     </span>
                 </div>
