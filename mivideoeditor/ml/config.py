@@ -80,3 +80,58 @@ class PipelineConfig(BaseModel):
     train: TrainConfig = TrainConfig()
     eval: EvalConfig = EvalConfig()
     predict: PredictConfig = PredictConfig()
+
+
+class HuggingFaceModelConfig(BaseModel):
+    """Config for Hugging Face detection/segmentation models."""
+
+    model_id: str = Field(
+        "facebook/detr-resnet-50",
+        description="HF Hub model id or local path",
+    )
+    revision: str | None = Field(None, description="Optional revision/commit")
+    num_labels: int | None = Field(
+        None, description="Override number of labels when training"
+    )
+    cache_dir: Path | None = Field(None, description="Optional HF cache dir")
+    task: Literal[
+        "detection",
+        "instance_segmentation",
+        "semantic_segmentation",
+    ] = Field("detection", description="Task type")
+
+    @field_validator("cache_dir")
+    @classmethod
+    def _to_path_hf(cls, v: Path | None) -> Path | None:
+        return None if v is None else Path(v)
+
+
+class HuggingFacePredictConfig(BaseModel):
+    """Config for Hugging Face prediction."""
+
+    score_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    max_detections: int = Field(50, ge=1)
+
+
+class HFTrainingConfig(BaseModel):
+    """Transformers Trainer configuration subset."""
+
+    output_dir: Path = Field(Path("artifacts/hf"))
+    num_train_epochs: int = Field(10, ge=1)
+    per_device_train_batch_size: int = Field(2, ge=1)
+    per_device_eval_batch_size: int = Field(2, ge=1)
+    learning_rate: float = Field(5e-5, gt=0)
+    weight_decay: float = Field(1e-4, ge=0)
+    lr_scheduler_type: str = Field("cosine")
+    warmup_ratio: float = Field(0.0, ge=0.0, le=0.3)
+    fp16: bool = Field(True)
+    logging_steps: int = Field(50, ge=1)
+    evaluation_strategy: Literal["no", "epoch", "steps"] = Field("epoch")
+    save_strategy: Literal["epoch", "steps"] = Field("epoch")
+    gradient_accumulation_steps: int = Field(1, ge=1)
+    seed: int = Field(42)
+
+    @field_validator("output_dir")
+    @classmethod
+    def _to_path2(cls, v: Path) -> Path:
+        return Path(v)

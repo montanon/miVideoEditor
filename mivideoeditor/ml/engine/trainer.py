@@ -4,14 +4,29 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader
+from transformers import (
+    AutoImageProcessor,
+    AutoModelForInstanceSegmentation,
+    AutoModelForObjectDetection,
+    Trainer,
+    TrainingArguments,
+)
 
-from mivideoeditor.ml.config import DataConfig, EvalConfig, ModelConfig, TrainConfig
+from mivideoeditor.ml.config import (
+    DataConfig,
+    EvalConfig,
+    HFTrainingConfig,
+    HuggingFaceModelConfig,
+    ModelConfig,
+    TrainConfig,
+)
 from mivideoeditor.ml.data import DetectionDataset, collate_fn
 from mivideoeditor.ml.models import build_model, count_parameters
 
@@ -28,8 +43,8 @@ class TrainArtifacts:
     params: dict[str, Any]
 
 
-class Trainer:
-    """Trainer encapsulates dataset, model, loop and checkpointing."""
+class DetectionTrainer:
+    """Detection trainer encapsulates dataset, model, loop and checkpointing."""
 
     def __init__(
         self,
@@ -43,16 +58,15 @@ class Trainer:
         self.model_cfg = model_cfg
         self.train_cfg = train_cfg
         self.eval_cfg = eval_cfg or EvalConfig()
-        self.device = torch.device(
-            device
-            or (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-        )
+        # Prefer explicit device if provided; otherwise pick CUDA, then MPS, else CPU
+        if device is not None:
+            self.device = torch.device(device)
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
 
         # Data
         self.ds_train = DetectionDataset(data_cfg, split="train")
@@ -88,7 +102,11 @@ class Trainer:
         self.ckpt_dir = train_cfg.checkpoint_dir
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    def _step(self, images: list[torch.Tensor], targets: list[dict[str, torch.Tensor]]):
+    def _step(
+        self,
+        images: list[torch.Tensor],
+        targets: list[dict[str, torch.Tensor]],
+    ) -> tuple[float, dict[str, float]]:
         """Train one step."""
         self.model.train()
         images = [img.to(self.device) for img in images]
@@ -119,8 +137,8 @@ class Trainer:
         total_score = 0.0
         total_count = 0
         for images, _ in self.val_loader:
-            cpu_images = [img.to("cpu") for img in images]
-            outputs = self.model(cpu_images)
+            device_images = [img.to(self.device) for img in images]
+            outputs = self.model(device_images)
             for out in outputs:
                 scores = out.get("scores")
                 if scores is not None:
@@ -134,6 +152,7 @@ class Trainer:
         best_metric = -1.0
         best_epoch = -1
         last_ckpt = None
+        best_path = self.ckpt_dir / "best.pt"
 
         for epoch in range(1, self.train_cfg.epochs + 1):
             running = 0.0
@@ -166,7 +185,6 @@ class Trainer:
             if val_metric >= best_metric:
                 best_metric = val_metric
                 best_epoch = epoch
-                best_path = self.ckpt_dir / "best.pt"
                 torch.save(ckpt, best_path)
 
             if self.train_cfg.save_best_only and last_ckpt and ckpt_path != best_path:
@@ -198,5 +216,167 @@ class Trainer:
             ),
             best_epoch=best_epoch,
             best_metric=best_metric,
-            params=asdict(count_parameters(self.model)),
+            params=count_parameters(self.model),
+        )
+
+
+class HFCocoDataset(torch.utils.data.Dataset):
+    """Hugging Face COCO dataset."""
+
+    def __init__(
+        self, images_dir: Path, annotations_path: Path, split_ratio: float, split: str
+    ) -> None:
+        super().__init__()
+        data = json.loads(Path(annotations_path).read_text(encoding="utf-8"))
+        self.images_dir = Path(images_dir)
+        self.images = sorted(data.get("images", []), key=lambda im: im.get("id", 0))
+        anns = data.get("annotations", [])
+        self.anns_by_image: dict[int, list[dict[str, Any]]] = {}
+        for ann in anns:
+            self.anns_by_image.setdefault(int(ann["image_id"]), []).append(ann)
+        cutoff = int(len(self.images) * split_ratio)
+        self.indices = (
+            list(range(0, cutoff))
+            if split == "train"
+            else list(range(cutoff, len(self.images)))
+        )
+
+    def __len__(self) -> int:
+        """Get the length of the dataset."""
+        return len(self.indices)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        """Get an item from the dataset."""
+        real_idx = self.indices[idx]
+        image_info = self.images[real_idx]
+        file_name = image_info.get("file_name")
+        image_id = int(image_info.get("id"))
+        image_path = self.images_dir / str(file_name)
+        image = Image.open(image_path).convert("RGB")
+        annotations = [
+            {
+                "bbox": ann.get("bbox", [0, 0, 0, 0]),
+                "category_id": int(ann.get("category_id", 1)),
+                "area": float(ann.get("area", 0.0)),
+                "iscrowd": int(ann.get("iscrowd", 0)),
+            }
+            for ann in self.anns_by_image.get(image_id, [])
+        ]
+        return {"image": image, "image_id": image_id, "annotations": annotations}
+
+
+@dataclass
+class HFTrainArtifacts:
+    """Artifacts from Hugging Face training."""
+
+    output_dir: Path
+    best_metrics: dict[str, Any]
+    best_model_path: Path | None
+
+
+class HFTrainer:
+    """Hugging Face trainer."""
+
+    def __init__(
+        self,
+        model_cfg: HuggingFaceModelConfig,
+        train_cfg: HFTrainingConfig,
+        images_dir: Path,
+        annotations_path: Path,
+        train_split: float = 0.8,
+    ) -> None:
+        self.model_cfg = model_cfg
+        self.train_cfg = train_cfg
+        self.images_dir = Path(images_dir)
+        self.annotations_path = Path(annotations_path)
+        self.train_split = train_split
+        self._processor = None
+        self._model = None
+
+    def _build(self) -> Trainer:
+        """Build the model."""
+        self._processor = AutoImageProcessor.from_pretrained(
+            self.model_cfg.model_id,
+            revision=self.model_cfg.revision,
+            cache_dir=self.model_cfg.cache_dir,
+        )
+        if self.model_cfg.task == "detection":
+            self._model = AutoModelForObjectDetection.from_pretrained(
+                self.model_cfg.model_id,
+                revision=self.model_cfg.revision,
+                cache_dir=self.model_cfg.cache_dir,
+                ignore_mismatched_sizes=self.model_cfg.num_labels is not None,
+                num_labels=self.model_cfg.num_labels,
+            )
+        elif self.model_cfg.task == "instance_segmentation":
+            self._model = AutoModelForInstanceSegmentation.from_pretrained(
+                self.model_cfg.model_id,
+                revision=self.model_cfg.revision,
+                cache_dir=self.model_cfg.cache_dir,
+                ignore_mismatched_sizes=self.model_cfg.num_labels is not None,
+                num_labels=self.model_cfg.num_labels,
+            )
+        else:
+            msg = "semantic_segmentation training not integrated"
+            raise NotImplementedError(msg)
+
+        train_ds = HFCocoDataset(
+            self.images_dir, self.annotations_path, self.train_split, "train"
+        )
+        eval_ds = HFCocoDataset(
+            self.images_dir, self.annotations_path, self.train_split, "val"
+        )
+
+        def collate_fn(examples: list[dict[str, Any]]) -> dict[str, Any]:
+            images = [e["image"] for e in examples]
+            annotations = [e["annotations"] for e in examples]
+            return self._processor(
+                images=images, annotations=annotations, return_tensors="pt"
+            )
+
+        args = TrainingArguments(
+            output_dir=str(self.train_cfg.output_dir),
+            num_train_epochs=self.train_cfg.num_train_epochs,
+            per_device_train_batch_size=self.train_cfg.per_device_train_batch_size,
+            per_device_eval_batch_size=self.train_cfg.per_device_eval_batch_size,
+            learning_rate=self.train_cfg.learning_rate,
+            weight_decay=self.train_cfg.weight_decay,
+            lr_scheduler_type=self.train_cfg.lr_scheduler_type,
+            warmup_ratio=self.train_cfg.warmup_ratio,
+            fp16=self.train_cfg.fp16,
+            logging_steps=self.train_cfg.logging_steps,
+            evaluation_strategy=self.train_cfg.evaluation_strategy,
+            save_strategy=self.train_cfg.save_strategy,
+            gradient_accumulation_steps=self.train_cfg.gradient_accumulation_steps,
+            load_best_model_at_end=self.train_cfg.evaluation_strategy != "no",
+            seed=self.train_cfg.seed,
+            report_to=[],
+        )
+
+        return Trainer(
+            model=self._model,
+            args=args,
+            train_dataset=train_ds,
+            eval_dataset=eval_ds
+            if self.train_cfg.evaluation_strategy != "no"
+            else None,
+            data_collator=collate_fn,
+            tokenizer=self._processor,
+        )
+
+    def fit(self) -> HFTrainArtifacts:
+        trainer = self._build()  # type: ignore[assignment]
+        train_result = trainer.train()
+        metrics = train_result.metrics or {}
+        trainer.save_model()
+        (self.train_cfg.output_dir / "train_metrics.json").write_text(
+            json.dumps(metrics, indent=2), encoding="utf-8"
+        )
+        best_path = None
+        if getattr(trainer.args, "load_best_model_at_end", False):
+            best_path = Path(trainer.args.output_dir) / "checkpoint-best"
+        return HFTrainArtifacts(
+            output_dir=self.train_cfg.output_dir,
+            best_metrics=metrics,
+            best_model_path=best_path,
         )
