@@ -4,10 +4,16 @@ Provides decoupled training, evaluation, and prediction workflows and an
 adapter to plug trained models into the existing detection pipeline.
 """
 
+from mivideoeditor.ml.api import (
+    MLEvaluator,
+    MLPredictor,
+    MLTrainer,
+    Prediction,
+)
 from mivideoeditor.ml.backends.factory import (
-    get_evaluator,
-    get_predictor,
-    get_trainer,
+    build_evaluator,
+    build_predictor,
+    build_trainer,
 )
 from mivideoeditor.ml.config import (
     DataConfig,
@@ -36,12 +42,17 @@ __all__ = [
     "Trainer",
     "Evaluator",
     "Predictor",
+    # Unified interfaces
+    "MLPredictor",
+    "Prediction",
+    "MLTrainer",
+    "MLEvaluator",
     # HF Configs
     "HuggingFaceModelConfig",
     "HuggingFacePredictConfig",
     "HFTrainingConfig",
     # Backends factory
-    "get_trainer",
-    "get_evaluator",
-    "get_predictor",
+    "build_trainer",
+    "build_evaluator",
+    "build_predictor",
 ]
