@@ -9,12 +9,12 @@ import torchvision
 from torch import nn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
-from mivideoeditor.ml.config import ModelConfig
+from mivideoeditor.ml.config import TorchModelConfig
 
 logger = logging.getLogger(__name__)
 
 
-def build_model(cfg: ModelConfig) -> nn.Module:
+def build_model(cfg: TorchModelConfig) -> nn.Module:
     """Create a torchvision detection model according to config."""
     num_classes = cfg.num_classes
     name = cfg.name

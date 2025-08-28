@@ -27,7 +27,7 @@ class DataConfig(BaseModel):
         return Path(v)
 
 
-class ModelConfig(BaseModel):
+class TorchModelConfig(BaseModel):
     """Model-related configuration."""
 
     name: Literal[
@@ -39,7 +39,7 @@ class ModelConfig(BaseModel):
     freeze_backbone: bool = False
 
 
-class TrainConfig(BaseModel):
+class TorchTrainConfig(BaseModel):
     """Training hyperparameters."""
 
     epochs: int = Field(10, ge=1)
@@ -56,7 +56,7 @@ class TrainConfig(BaseModel):
         return Path(v)
 
 
-class EvalConfig(BaseModel):
+class TorchEvalConfig(BaseModel):
     """Evaluation configuration."""
 
     iou_threshold: float = Field(0.5, ge=0.1, le=0.9)
@@ -64,7 +64,7 @@ class EvalConfig(BaseModel):
     max_detections: int = Field(100, ge=1)
 
 
-class PredictConfig(BaseModel):
+class TorchPredictConfig(BaseModel):
     """Prediction configuration."""
 
     score_threshold: float = Field(0.5, ge=0.0, le=1.0)
@@ -76,10 +76,10 @@ class PipelineConfig(BaseModel):
     """Full pipeline configuration bundle."""
 
     data: DataConfig
-    model: ModelConfig = ModelConfig()
-    train: TrainConfig = TrainConfig()
-    eval: EvalConfig = EvalConfig()
-    predict: PredictConfig = PredictConfig()
+    model: TorchModelConfig = TorchModelConfig()
+    train: TorchTrainConfig = TorchTrainConfig()
+    eval: TorchEvalConfig = TorchEvalConfig()
+    predict: TorchPredictConfig = TorchPredictConfig()
 
 
 class HuggingFaceModelConfig(BaseModel):
@@ -135,3 +135,64 @@ class HFTrainingConfig(BaseModel):
     @classmethod
     def _to_path2(cls, v: Path) -> Path:
         return Path(v)
+
+
+class ModelConfig(BaseModel):
+    """Backend-agnostic model configuration."""
+
+    backend: str = Field("torch", description="'torch' or 'hf'")
+    task: str = Field("detection", description="'detection' or 'instance_segmentation'")
+    labels: list[str] = Field(
+        default_factory=lambda: ["custom"], description="Ordered class names"
+    )
+    # Torch specifics
+    arch: str | None = Field(
+        default="fasterrcnn_resnet50_fpn",
+        description="Torch arch when backend='torch'",
+    )
+    pretrained: bool = True
+    freeze_backbone: bool = False
+    # HF specifics
+    model_id: str | None = Field(
+        default=None, description="HF model id when backend='hf'"
+    )
+    revision: str | None = None
+    cache_dir: Path | None = None
+    image_size: int = Field(800, ge=64)
+
+
+class PredictConfig(BaseModel):
+    """Predict config."""
+
+    score_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    max_detections: int = Field(100, ge=1)
+    image_size: int = Field(800, ge=64)
+
+
+class TrainConfig(BaseModel):
+    """Train config."""
+
+    epochs: int = Field(10, ge=1)
+    lr: float = Field(5e-4, gt=0)
+    weight_decay: float = Field(1e-4, ge=0)
+    batch_size_train: int = Field(4, ge=1)
+    batch_size_eval: int = Field(4, ge=1)
+    amp: bool = True
+    seed: int = 42
+    output_dir: Path = Field(Path("artifacts/ml"))
+
+    @field_validator("output_dir")
+    @classmethod
+    def _to_path_out(cls, v: Path) -> Path:
+        return Path(v)
+
+
+class EvalConfig(BaseModel):
+    """Eval config."""
+
+    score_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    max_detections: int = Field(100, ge=1)
+    iou_thresholds: list[float] = Field(default_factory=lambda: [0.5, 0.75])
+    metrics: list[str] = Field(
+        default_factory=lambda: ["coco_map", "prf"]
+    )  # try COCO first

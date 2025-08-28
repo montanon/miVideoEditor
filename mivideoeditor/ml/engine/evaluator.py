@@ -16,7 +16,7 @@ from transformers import (
     AutoModelForObjectDetection,
 )
 
-from mivideoeditor.ml.config import EvalConfig
+from mivideoeditor.ml.config import TorchEvalConfig
 from mivideoeditor.ml.engine.trainer import (
     HFCocoDataset,
     HuggingFaceModelConfig,
@@ -44,7 +44,7 @@ class Evaluator:
         self,
         model: torch.nn.Module,
         loader: DataLoader,
-        cfg: EvalConfig,
+        cfg: TorchEvalConfig,
         device: str | torch.device | None = None,
     ) -> None:
         self.model = model

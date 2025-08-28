@@ -21,11 +21,11 @@ from transformers import (
 
 from mivideoeditor.ml.config import (
     DataConfig,
-    EvalConfig,
     HFTrainingConfig,
     HuggingFaceModelConfig,
-    ModelConfig,
-    TrainConfig,
+    TorchEvalConfig,
+    TorchModelConfig,
+    TorchTrainConfig,
 )
 from mivideoeditor.ml.data import DetectionDataset, collate_fn
 from mivideoeditor.ml.models import build_model, count_parameters
@@ -49,15 +49,15 @@ class DetectionTrainer:
     def __init__(
         self,
         data_cfg: DataConfig,
-        model_cfg: ModelConfig,
-        train_cfg: TrainConfig,
-        eval_cfg: EvalConfig | None = None,
+        model_cfg: TorchModelConfig,
+        train_cfg: TorchTrainConfig,
+        eval_cfg: TorchEvalConfig | None = None,
         device: str | None = None,
     ) -> None:
         self.data_cfg = data_cfg
         self.model_cfg = model_cfg
         self.train_cfg = train_cfg
-        self.eval_cfg = eval_cfg or EvalConfig()
+        self.eval_cfg = eval_cfg or TorchEvalConfig()
         # Prefer explicit device if provided; otherwise pick CUDA, then MPS, else CPU
         if device is not None:
             self.device = torch.device(device)

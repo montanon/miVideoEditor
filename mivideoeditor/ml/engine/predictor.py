@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torchvision
 from PIL import Image
 from torchvision.transforms import v2 as T
 from transformers import (
@@ -20,8 +21,8 @@ from mivideoeditor.ml.config import (
     HFTrainingConfig,
     HuggingFaceModelConfig,
     HuggingFacePredictConfig,
-    ModelConfig,
-    PredictConfig,
+    TorchModelConfig,
+    TorchPredictConfig,
 )
 from mivideoeditor.ml.models import build_model
 
@@ -42,12 +43,12 @@ class Predictor:
 
     def __init__(
         self,
-        model_cfg: ModelConfig,
-        predict_cfg: PredictConfig | None = None,
+        model_cfg: TorchModelConfig,
+        predict_cfg: TorchPredictConfig | None = None,
         device: str | None = None,
     ) -> None:
         self.model_cfg = model_cfg
-        self.predict_cfg = predict_cfg or PredictConfig()
+        self.predict_cfg = predict_cfg or TorchPredictConfig()
         self.device = torch.device(
             device
             or (
@@ -181,6 +182,83 @@ class HFPredictor:
         return HFPrediction(boxes=boxes, scores=scores, labels=labels)
 
     def predict_numpy(self, image_bgr: np.ndarray) -> HFPrediction:
+        """Predict on an OpenCV-style BGR numpy image."""
+        if image_bgr.ndim == 3 and image_bgr.shape[2] == 3:
+            img_rgb = image_bgr[:, :, ::-1]
+        else:
+            img_rgb = np.stack([image_bgr] * 3, axis=-1)
+        pil = Image.fromarray(img_rgb)
+        return self.predict_pil(pil)
+
+
+class TorchSegmentationPredictor:
+    """Torch Mask R-CNN predictor returning boxes/scores/labels and binary masks."""
+
+    def __init__(
+        self,
+        model_cfg: TorchModelConfig,
+        predict_cfg: TorchPredictConfig | None = None,
+        device: str | None = None,
+    ) -> None:
+        self.model_cfg = model_cfg
+        self.predict_cfg = predict_cfg or TorchPredictConfig()
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        # Build Mask R-CNN with correct num_classes
+        weights = (
+            torchvision.models.detection.MaskRCNN_ResNet50_FPN_Weights.DEFAULT
+            if model_cfg and getattr(model_cfg, "pretrained", True)
+            else None
+        )
+        self.model = torchvision.models.detection.maskrcnn_resnet50_fpn(
+            weights=weights, num_classes=model_cfg.num_classes
+        ).to(self.device)
+        self.model.eval()
+        size = self.predict_cfg.image_size
+        self.transforms = T.Compose(
+            [
+                T.ToImage(),
+                T.ToDtype(torch.float32, scale=True),
+                T.Resize(size, max_size=size),
+            ]
+        )
+
+    def load_checkpoint(self, checkpoint_path: Path) -> None:
+        """Load the model checkpoint."""
+        ckpt = torch.load(checkpoint_path, map_location=self.device)
+        state = ckpt.get("model_state", ckpt)
+        self.model.load_state_dict(state, strict=False)
+
+    @torch.no_grad()
+    def predict_pil(self, image: Image.Image) -> Prediction:
+        """Predict on a PIL image."""
+        tensor = self.transforms(image).to(self.device)
+        outputs = self.model([tensor])[0]
+        scores = outputs.get("scores", torch.empty(0))
+        boxes = outputs.get("boxes", torch.empty((0, 4)))
+        labels = outputs.get("labels", torch.empty(0, dtype=torch.int64))
+        masks = outputs.get(
+            "masks", torch.empty((0, 1, tensor.shape[-2], tensor.shape[-1]))
+        )
+
+        mask = scores >= self.predict_cfg.score_threshold
+        boxes = boxes[mask][: self.predict_cfg.max_detections]
+        scores = scores[mask][: self.predict_cfg.max_detections]
+        labels = labels[mask][: self.predict_cfg.max_detections]
+        masks = masks[mask][: self.predict_cfg.max_detections]
+        # Binarize masks at 0.5
+        if masks.numel() > 0:
+            masks = (masks.squeeze(1) > 0.5).to(torch.uint8)
+
+        return Prediction(
+            boxes=boxes.detach().cpu().numpy(),
+            scores=scores.detach().cpu().numpy(),
+            labels=labels.detach().cpu().numpy(),
+            masks=masks.detach().cpu().numpy() if masks.numel() > 0 else None,
+        )
+
+    def predict_numpy(self, image_bgr: np.ndarray) -> Prediction:
         """Predict on an OpenCV-style BGR numpy image."""
         if image_bgr.ndim == 3 and image_bgr.shape[2] == 3:
             img_rgb = image_bgr[:, :, ::-1]

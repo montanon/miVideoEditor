@@ -16,6 +16,9 @@ from mivideoeditor.ml.backends.base import (
 )
 from mivideoeditor.ml.engine.evaluator import Evaluator, HFEvaluator
 from mivideoeditor.ml.engine.predictor import HFPredictor, Predictor
+from mivideoeditor.ml.engine.predictor import (
+    TorchSegmentationPredictor as _SegPred,
+)
 from mivideoeditor.ml.engine.trainer import HFTrainer, Trainer
 
 
@@ -28,9 +31,12 @@ class _TorchPredictorAdapter(BasePredictor):
         return StandardPrediction(boxes=out.boxes, scores=out.scores, labels=out.labels)
 
 
-def _make_torch_predictor(**kwargs: Any) -> BasePredictor:
+def _make_torch_predictor(task: str, **kwargs: Any) -> BasePredictor:
     checkpoint_path = kwargs.pop("checkpoint_path", None)
-    impl = Predictor(**kwargs)
+    if task == "instance_segmentation":
+        impl = _SegPred(**kwargs)
+    else:
+        impl = Predictor(**kwargs)
     if checkpoint_path:
         impl.load_checkpoint(Path(checkpoint_path))
     return _TorchPredictorAdapter(impl=impl)
@@ -70,7 +76,7 @@ def build_predictor(backend: str, task: str, **kwargs: Any) -> BasePredictor:
     """Return a predictor for the given backend and task (no DI registry)."""
     backend = (backend or "torch").lower()
     if backend == "torch":
-        return _make_torch_predictor(**kwargs)
+        return _make_torch_predictor(task=task, **kwargs)
     if backend == "hf":
         return _make_hf_predictor(**kwargs)
     msg = f"Unknown backend: {backend}"

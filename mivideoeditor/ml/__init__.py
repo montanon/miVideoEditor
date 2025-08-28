@@ -4,16 +4,16 @@ Provides decoupled training, evaluation, and prediction workflows and an
 adapter to plug trained models into the existing detection pipeline.
 """
 
-from mivideoeditor.ml.api import (
-    MLEvaluator,
-    MLPredictor,
-    MLTrainer,
-    Prediction,
-)
 from mivideoeditor.ml.backends.factory import (
     build_evaluator,
     build_predictor,
     build_trainer,
+)
+from mivideoeditor.ml.base import (
+    MLEvaluator,
+    MLPredictor,
+    MLTrainer,
+    Prediction,
 )
 from mivideoeditor.ml.config import (
     DataConfig,
@@ -24,6 +24,10 @@ from mivideoeditor.ml.config import (
     ModelConfig,
     PipelineConfig,
     PredictConfig,
+    TorchEvalConfig,
+    TorchModelConfig,
+    TorchPredictConfig,
+    TorchTrainConfig,
     TrainConfig,
 )
 from mivideoeditor.ml.engine.evaluator import Evaluator
@@ -33,11 +37,16 @@ from mivideoeditor.ml.engine.trainer import Trainer
 __all__ = [
     # Configs
     "DataConfig",
+    "TorchModelConfig",
+    "TorchTrainConfig",
+    "TorchEvalConfig",
+    "TorchPredictConfig",
+    "PipelineConfig",
+    # Unified configs
     "ModelConfig",
+    "PredictConfig",
     "TrainConfig",
     "EvalConfig",
-    "PredictConfig",
-    "PipelineConfig",
     # Engines
     "Trainer",
     "Evaluator",
