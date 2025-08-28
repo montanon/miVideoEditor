@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Annotation Tool</title>
+    <link rel="stylesheet" href="/static/annotation-app.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <h1>Video Annotation Tool</h1>
+            <p>Create training data for sensitive area detection</p>
+        </header>
+
+        <!-- Video Upload Section -->
+        <section class="upload-section" id="uploadSection">
+            <div class="upload-area">
+                <input type="file" id="videoInput" accept="video/*,.mkv" style="display: none;">
+                <button class="upload-btn" onclick="document.getElementById('videoInput').click()">
+                    📹 Upload Video
+                </button>
+                <p class="upload-help">Select a screen recording video (MP4, MOV, AVI, WEBM, MKV)</p>
+            </div>
+            <div class="upload-progress" id="uploadProgress" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p class="progress-text" id="progressText">Uploading...</p>
+            </div>
+        </section>
+
+        <!-- Video Player Section -->
+        <section class="video-section" id="videoSection" style="display: none;">
+            <div class="video-container">
+                <div class="video-wrapper">
+                    <video id="videoPlayer" controls>
+                        Your browser does not support the video tag.
+                    </video>
+                    <canvas id="annotationCanvas"></canvas>
+                </div>
+                
+                <!-- Video Controls -->
+                <div class="video-controls">
+                    <button id="playPauseBtn">⏯️ Play/Pause</button>
+                    <button id="frameBackBtn">⬅️ Frame Back</button>
+                    <button id="frameForwardBtn">➡️ Frame Forward</button>
+                    <span class="current-time" id="currentTime">00:00</span>
+                    <span class="duration" id="videoDuration">00:00</span>
+                </div>
+
+                <!-- Timeline -->
+                <div class="timeline-container">
+                    <div class="timeline" id="timeline">
+                        <div class="timeline-progress" id="timelineProgress"></div>
+                        <div class="timeline-annotations" id="timelineAnnotations"></div>
+                        <div class="timeline-handle" id="timelineHandle"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Annotation Controls -->
+            <div class="annotation-controls">
+                <div class="control-group">
+                    <label for="areaType">Area Type:</label>
+                    <select id="areaType">
+                        <option value="chatgpt">ChatGPT</option>
+                        <option value="atuin">Atuin Terminal</option>
+                        <option value="terminal">Terminal</option>
+                        <option value="sensitive_text">Sensitive Text</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+                
+                <div class="control-group">
+                    <button id="saveAnnotationBtn" disabled>💾 Save Annotation</button>
+                    <button id="clearCanvasBtn">🗑️ Clear Canvas</button>
+                </div>
+
+                <div class="control-group">
+                    <span class="drawing-instructions">
+                        Click and drag on the video to draw bounding boxes
+                    </span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Annotations List Section -->
+        <section class="annotations-section" id="annotationsSection" style="display: none;">
+            <h2>Current Annotations</h2>
+            <div class="annotations-stats" id="annotationsStats"></div>
+            <div class="annotations-list" id="annotationsList"></div>
+            
+            <div class="export-controls">
+                <button id="exportJsonBtn">📄 Export JSON</button>
+                <button id="exportCocoBtn">🤖 Export COCO</button>
+            </div>
+        </section>
+
+        <!-- Status Messages -->
+        <div class="status-message" id="statusMessage"></div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="loading-spinner"></div>
+        <p class="loading-text">Processing...</p>
+    </div>
+
+    <script src="/static/annotation-app.js"></script>
+</body>
+</html>
