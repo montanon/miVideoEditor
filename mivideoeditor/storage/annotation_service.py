@@ -134,12 +134,19 @@ class AnnotationService:
                     "Failed to delete frame image: %s", annotation.image_path
                 )
 
-        # Delete from database (would need to be implemented in storage service)
-        # For now, we'll log the operation
-        logger.info("Annotation marked for deletion: %s", annotation_id)
-
-        # TODO: Implement actual database deletion in StorageService
-        return True
+        # Delete from database
+        try:
+            success = self.storage.delete_annotation(annotation_id)
+            if success:
+                logger.info("Annotation deleted from database: %s", annotation_id)
+            else:
+                logger.warning(
+                    "Failed to delete annotation from database: %s", annotation_id
+                )
+        except Exception as e:
+            logger.exception("Failed to delete annotation %s: %s", annotation_id, e)
+            return False
+        return success
 
     def get_annotation_statistics(self, video_id: str) -> dict:
         """Get statistics about annotations for a video."""

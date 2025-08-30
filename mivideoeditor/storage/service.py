@@ -14,9 +14,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from mivideoeditor.core.models import ValidationResult
+from mivideoeditor.core.models import BoundingBox, ValidationResult
 from mivideoeditor.storage.models import (
     AnnotationRecord,
+    TimeRangeAnnotationRecord,
     VideoRecord,
 )
 
@@ -232,6 +233,27 @@ class StorageService:
             )
         """)
 
+        # Time range annotations table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS time_range_annotations (
+                id TEXT PRIMARY KEY,
+                video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+                start_time REAL NOT NULL,
+                end_time REAL NOT NULL,
+                bbox_x INTEGER NOT NULL,
+                bbox_y INTEGER NOT NULL,
+                bbox_width INTEGER NOT NULL,
+                bbox_height INTEGER NOT NULL,
+                area_type TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                sample_interval REAL DEFAULT 1.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata JSON,
+                CONSTRAINT valid_range CHECK (end_time > start_time),
+                CONSTRAINT valid_bbox CHECK (bbox_width > 0 AND bbox_height > 0)
+            )
+        """)
+
         # Processing jobs table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS processing_jobs (
@@ -296,6 +318,7 @@ class StorageService:
             "CREATE INDEX IF NOT EXISTS idx_jobs_status ON processing_jobs(status)",
             "CREATE INDEX IF NOT EXISTS idx_jobs_video ON processing_jobs(video_id)",
             "CREATE INDEX IF NOT EXISTS idx_models_type_area ON models(model_type, area_type)",
+            "CREATE INDEX IF NOT EXISTS idx_time_ranges_video_time ON time_range_annotations(video_id, start_time)",
         ]
 
         for index_sql in indexes:
@@ -475,7 +498,88 @@ class StorageService:
 
                 results.append(AnnotationRecord(**data))
 
+        return results
+
+    # Time range annotation operations
+    def save_time_range_annotation(self, record: TimeRangeAnnotationRecord) -> str:
+        """Persist a time range annotation."""
+        with self._get_connection() as conn:
+            data = record.model_dump()
+            bbox = data.pop("bounding_box")
+            created_at = data["created_at"].isoformat()
+            metadata = json.dumps(data.get("metadata", {}))
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO time_range_annotations
+                (id, video_id, start_time, end_time, bbox_x, bbox_y, bbox_width, bbox_height,
+                 area_type, confidence, sample_interval, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    record.id,
+                    record.video_id,
+                    record.start_time,
+                    record.end_time,
+                    bbox.x,
+                    bbox.y,
+                    bbox.width,
+                    bbox.height,
+                    record.area_type,
+                    record.confidence,
+                    record.sample_interval,
+                    created_at,
+                    metadata,
+                ),
+            )
+            conn.commit()
+        return record.id
+
+    def get_time_range_annotations_by_video(
+        self, video_id: str
+    ) -> list[TimeRangeAnnotationRecord]:
+        """Fetch all time range annotations for a video."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM time_range_annotations WHERE video_id = ? ORDER BY start_time ASC",
+                (video_id,),
+            )
+            results: list[TimeRangeAnnotationRecord] = []
+            for row in cursor.fetchall():
+                data = dict(row)
+                bbox = BoundingBox(
+                    x=data.pop("bbox_x"),
+                    y=data.pop("bbox_y"),
+                    width=data.pop("bbox_width"),
+                    height=data.pop("bbox_height"),
+                )
+                md = json.loads(data["metadata"]) if data.get("metadata") else {}
+                tra = TimeRangeAnnotationRecord(
+                    id=data["id"],
+                    video_id=data["video_id"],
+                    start_time=float(data["start_time"]),
+                    end_time=float(data["end_time"]),
+                    bounding_box=bbox,
+                    area_type=data["area_type"],
+                    confidence=float(data.get("confidence", 1.0)),
+                    sample_interval=float(data.get("sample_interval", 1.0)),
+                    created_at=datetime.fromisoformat(data["created_at"])
+                    if isinstance(data["created_at"], str)
+                    else data["created_at"],
+                    metadata=md,
+                )
+                results.append(tra)
             return results
+
+    def delete_time_range_annotation(self, range_id: str) -> bool:
+        """Delete a time range annotation by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM time_range_annotations WHERE id = ?",
+                (range_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def get_storage_stats(self) -> dict[str, Any]:
         """Get comprehensive storage statistics."""

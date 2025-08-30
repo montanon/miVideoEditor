@@ -411,3 +411,56 @@ class ModelRecord(BaseModel):
         if self.accuracy_metrics:
             return next(iter(self.accuracy_metrics.values()))
         return None
+
+
+class TimeRangeAnnotationRecord(BaseModel):
+    """Persistent record for a time-range annotation spanning multiple frames."""
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique time range annotation identifier",
+    )
+    video_id: str = Field(..., min_length=1, description="Associated video ID")
+    start_time: float = Field(..., ge=0, description="Range start (seconds)")
+    end_time: float = Field(..., ge=0, description="Range end (seconds)")
+    bounding_box: BoundingBox = Field(
+        ..., description="Region applied across the range"
+    )
+    area_type: str = Field(..., description="Type of sensitive area")
+    confidence: float = Field(
+        default=1.0, ge=0.0, le=1.0, description="Confidence score"
+    )
+    sample_interval: float = Field(
+        default=1.0, gt=0, description="Sampling interval in seconds"
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC), description="Creation timestamp"
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, description="Additional metadata"
+    )
+
+    model_config = {
+        "str_strip_whitespace": True,
+        "validate_assignment": True,
+    }
+
+    @field_validator("area_type")
+    @classmethod
+    def validate_area_type(cls, v: str) -> str:
+        """Validate area type against supported types."""
+        if v not in SUPPORTED_AREA_TYPES:
+            msg = (
+                f"Unsupported area type: {v}. Must be one of "
+                f"{list(SUPPORTED_AREA_TYPES.keys())}"
+            )
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def validate_range(self) -> TimeRangeAnnotationRecord:
+        """Validate that end_time is greater than start_time."""
+        if self.end_time <= self.start_time:
+            msg = "end_time must be greater than start_time"
+            raise ValueError(msg)
+        return self
