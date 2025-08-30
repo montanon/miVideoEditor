@@ -1,1 +1,0 @@
-"""API routers for the video annotation application."""
