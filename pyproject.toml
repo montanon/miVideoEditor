@@ -16,6 +16,7 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
     "python-multipart>=0.0.6",
     "transformers>=4.55.4",
+    "pycocotools>=2.0.10",
 ]
 
 [tool.ruff.lint]
